@@ -7,8 +7,8 @@ Wants=postgresql.service
 Type=simple
 User=ergotime
 Group=ergotime
-WorkingDirectory=/opt/ergotime
-ExecStart=/opt/ergotime/bin/ergotime-server -config /etc/ergotime/config.yaml
+WorkingDirectory=/opt/ergotime2
+ExecStart=/opt/ergotime2/bin/ergotime-server -config /etc/ergotime/config.yaml
 Restart=on-failure
 RestartSec=3
 # Hardening
@@ -16,7 +16,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/ergotime
+ReadWritePaths=/opt/ergotime2
 # Environment overrides (optional)
 # Environment=ERGOTIME_DATABASE_PASSWORD=secret
 
