@@ -4,6 +4,12 @@ All notable changes to the ErgoTime server are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions are tagged `v*` on GitHub. That tag builds the Linux x86_64 binary and attaches it to a GitHub release.
 
+## [Unreleased]
+
+### Added
+
+- `/healthz` advertises `protocol`, the desktop sync contract. It stays at 1 until a change would make an older client misread this server or this server reject that client.
+
 ## [1.0.0] - 2026-11-09
 
 First release of the Go server. It replaces the Python Flask server. PostgreSQL remains the database.

@@ -135,12 +135,12 @@ Example nginx config: [deploy/nginx-ergotime.conf](deploy/nginx-ergotime.conf).
 
 All JSON endpoints under `/api` require authentication except:
 
-| Method | Path               | Description                                      |
-| ------ | ------------------ | ------------------------------------------------ |
-| POST   | `/api/auth/login`  | JSON `{username,password}` → sets session cookie |
-| POST   | `/api/auth/logout` | Clears session cookie                            |
-| GET    | `/healthz`         | Liveness                                         |
-| GET    | `/readyz`          | DB readiness                                     |
+| Method | Path               | Description                                                     |
+| ------ | ------------------ | --------------------------------------------------------------- |
+| POST   | `/api/auth/login`  | JSON `{username,password}` → sets session cookie                |
+| POST   | `/api/auth/logout` | Clears session cookie                                           |
+| GET    | `/healthz`         | Liveness. `protocol` is the desktop sync contract (currently 1) |
+| GET    | `/readyz`          | DB readiness                                                    |
 
 Authenticated (cookie JWT, `Authorization: Bearer <jwt>`, or HTTP Basic):
 
