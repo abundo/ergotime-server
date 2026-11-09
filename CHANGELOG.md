@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 ### Added
 
 - `/healthz` advertises `protocol`, the desktop sync contract. It stays at 1 until a change would make an older client misread this server or this server reject that client.
+- Example Caddyfile for the reverse HTTPS proxy (`deploy/caddy-ergotime.Caddyfile`).
 
 ## [1.0.0] - 2026-11-09
 

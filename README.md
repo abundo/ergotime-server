@@ -14,7 +14,7 @@ and syncs with the desktop client.
 | DB       | PostgreSQL                                                                                               |
 | Auth     | Local users table, bcrypt passwords, JWT in **httpOnly** cookie (or HTTP Basic / Bearer for API clients) |
 | Frontend | Vue 3, Vite, Vue Router, Pinia, PrimeVue                                                                 |
-| Deploy   | Reverse HTTPS proxy (nginx example included)                                                             |
+| Deploy   | Reverse HTTPS proxy (nginx and Caddy examples included)                                                  |
 
 ## CI
 
@@ -44,7 +44,7 @@ internal/
   middleware/        auth, CORS, security headers, rate limit
   models/            GORM models
 config/              example + debug configs
-deploy/              nginx + systemd units
+deploy/              nginx, Caddy, and systemd units
 web/                 Vue 3 SPA (Vite) + go:embed of dist/ into the binary
 ```
 
@@ -129,7 +129,7 @@ See [config/config.example.yaml](config/config.example.yaml) for all keys.
 - `server.host: 127.0.0.1` (do not expose Go directly)
 - `cors.allowed_origins` only if the SPA is on a different origin (same-origin is preferred)
 
-Example nginx config: [deploy/nginx-ergotime.conf](deploy/nginx-ergotime.conf).
+Example proxy configs: [deploy/nginx-ergotime.conf](deploy/nginx-ergotime.conf), [deploy/caddy-ergotime.Caddyfile](deploy/caddy-ergotime.Caddyfile).
 
 ## HTTP API overview
 

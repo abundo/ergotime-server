@@ -1,0 +1,34 @@
+# Example reverse HTTPS proxy for ergotime-server.
+# TLS terminates here; Go listens on 127.0.0.1:8080.
+#
+# Caddy obtains and renews the certificate (automatic HTTPS) and redirects
+# port 80 to HTTPS. Point the site's DNS A/AAAA record at this host.
+#
+# Install as /etc/caddy/Caddyfile, or import this file from there:
+#   import /etc/caddy/caddy-ergotime.Caddyfile
+#
+# On the Go side set server.host to 127.0.0.1, server.public_url to this
+# site, and auth.cookie_secure to true. See config/config.example.yaml.
+
+ergotime.example.com {
+	# Same limit the app enforces (Echo BodyLimit 1M).
+	request_body {
+		max_size 1MB
+	}
+
+	# The app sets these too. defer overwrites the upstream copies
+	# so the response carries one value of each.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		defer
+	}
+
+	# reverse_proxy preserves Host and sets X-Forwarded-For,
+	# X-Forwarded-Proto, and X-Forwarded-Host. Echo reads
+	# X-Forwarded-For for the client IP (login rate limit).
+	# Cookies, including the httpOnly session cookie, are passed through.
+	reverse_proxy 127.0.0.1:8080
+}
