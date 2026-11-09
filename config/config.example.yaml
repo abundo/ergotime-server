@@ -1,0 +1,60 @@
+# Ergotime server configuration
+# Copy to config.yaml or set ERGOTIME_CONFIG=/path/to/config.yaml
+
+server:
+  # Bind address. Behind a reverse proxy, 127.0.0.1 is recommended.
+  host: "127.0.0.1"
+  port: 8080
+  # Public base URL (used in logs / absolute links if needed)
+  public_url: "https://ergotime.example.com"
+  # Mode: debug | release
+  mode: "release"
+
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "ergotime"
+  password: "change-me"
+  name: "ergotime"
+  sslmode: "disable"
+  # Max open / idle connections
+  max_open_conns: 25
+  max_idle_conns: 5
+
+auth:
+  # HS256 secret for JWT. Generate with: openssl rand -base64 48
+  jwt_secret: "CHANGE-ME-TO-A-LONG-RANDOM-SECRET"
+  # Access token lifetime
+  token_ttl_hours: 24
+  # Cookie name for the session JWT (httpOnly)
+  cookie_name: "ergotime_session"
+  # Cookie settings for reverse HTTPS proxy
+  cookie_secure: true
+  cookie_samesite: "lax" # lax | strict | none
+  cookie_domain: "" # empty = host-only
+  cookie_path: "/"
+
+cors:
+  # Allowed browser origins for the SPA / API clients.
+  # When serving SPA from the same origin, you can leave this empty.
+  allowed_origins:
+    - "https://ergotime.example.com"
+  allow_credentials: true
+
+security:
+  # Content-Security-Policy for HTML responses
+  csp: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+  # Rate limit login attempts (requests per minute per IP)
+  login_rate_limit: 10
+
+# Bootstrap admin created on first start if no users exist
+bootstrap:
+  enabled: true
+  username: "admin"
+  password: "admin" # change immediately after first login
+
+# SPA is embedded in the release binary (make release / make frontend && make server).
+# Optional on-disk override for local frontend iteration without recompiling Go:
+static:
+  dir: "" # e.g. "web/dist" to serve from disk instead of embed
+  spa: true # fall back to index.html for client-side routes

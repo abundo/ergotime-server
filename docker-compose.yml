@@ -1,0 +1,21 @@
+# Local development PostgreSQL for ergotime-server
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ergotime-db
+    environment:
+      POSTGRES_USER: ergotime
+      POSTGRES_PASSWORD: ergotime
+      POSTGRES_DB: ergotime
+    ports:
+      - "5432:5432"
+    volumes:
+      - ergotime_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ergotime -d ergotime"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ergotime_pgdata:

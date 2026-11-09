@@ -1,0 +1,24 @@
+[Unit]
+Description=Ergotime API and web GUI
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=ergotime
+Group=ergotime
+WorkingDirectory=/opt/ergotime
+ExecStart=/opt/ergotime/bin/ergotime-server -config /etc/ergotime/config.yaml
+Restart=on-failure
+RestartSec=3
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ergotime
+# Environment overrides (optional)
+# Environment=ERGOTIME_DATABASE_PASSWORD=secret
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,41 @@
+server:
+  host: "127.0.0.1"
+  port: 8080
+  public_url: "http://127.0.0.1:8080"
+  mode: "debug"
+
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "ergotime"
+  password: "ergotime"
+  name: "ergotime"
+  sslmode: "disable"
+
+auth:
+  jwt_secret: "dev-only-insecure-secret-change-me"
+  token_ttl_hours: 24
+  cookie_name: "ergotime_session"
+  cookie_secure: false
+  cookie_samesite: "lax"
+  cookie_path: "/"
+
+cors:
+  allowed_origins:
+    - "http://127.0.0.1:5173"
+    - "http://localhost:5173"
+  allow_credentials: true
+
+security:
+  login_rate_limit: 30
+
+bootstrap:
+  enabled: true
+  username: "admin"
+  password: "admin"
+
+static:
+  # Serve from disk so `npm run build` is picked up without recompiling Go.
+  # Leave empty to use assets embedded in the binary.
+  dir: "web/dist"
+  spa: true
