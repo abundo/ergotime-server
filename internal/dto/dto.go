@@ -111,16 +111,19 @@ type MonthlyCustomer struct {
 	Description string           `json:"description"`
 	TotalHours  float64          `json:"total_hours"`
 	TotalHM     string           `json:"total_hm"`
+	Days        []MonthlyDay     `json:"days"`
 	Projects    []MonthlyProject `json:"projects"`
 }
 
+// MonthlyProject is one row in the customer summary. Shared intervals are
+// "Several projects" and are not added to a single project.
 type MonthlyProject struct {
-	ProjectID  int64        `json:"project_id"`
-	Name       string       `json:"name"`
-	CostCenter string       `json:"cost_center"`
-	TotalHours float64      `json:"total_hours"`
-	TotalHM    string       `json:"total_hm"`
-	Days       []MonthlyDay `json:"days"`
+	ProjectID  int64   `json:"project_id"`
+	Name       string  `json:"name"`
+	CostCenter string  `json:"cost_center"`
+	Unit       string  `json:"unit"`
+	TotalHours float64 `json:"total_hours"`
+	TotalHM    string  `json:"total_hm"`
 }
 
 type MonthlyDay struct {
@@ -130,13 +133,20 @@ type MonthlyDay struct {
 	Entries    []MonthlyEntry `json:"entries"`
 }
 
+// MonthlyNote is one project and the comment written for that project.
+// Several notes share one worked interval.
+type MonthlyNote struct {
+	Project string `json:"project"`
+	Comment string `json:"comment"`
+}
+
 type MonthlyEntry struct {
-	ID      int64   `json:"id"`
-	Start   string  `json:"start"`
-	Stop    string  `json:"stop"`
-	Hours   float64 `json:"hours"`
-	HM      string  `json:"hm"`
-	Comment string  `json:"comment"`
+	ID    int64         `json:"id"`
+	Start string        `json:"start"`
+	Stop  string        `json:"stop"`
+	Hours float64       `json:"hours"`
+	HM    string        `json:"hm"`
+	Notes []MonthlyNote `json:"notes"`
 }
 
 // TimesheetCustomerRow is one customer with time in a month.

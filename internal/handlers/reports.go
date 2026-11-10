@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -583,209 +584,259 @@ func (h *ReportsHandler) Monthly(c echo.Context) error {
 
 	customerID, _ := strconv.ParseInt(c.QueryParam("customer_id"), 10, 64)
 	projectID, _ := strconv.ParseInt(c.QueryParam("project_id"), 10, 64)
-	monthStr := c.QueryParam("month")
-	if monthStr == "" {
-		monthStr = time.Now().Format("2006-01")
-	}
-	start, err := time.ParseInLocation("2006-01", monthStr, time.Local)
+	monthStr, start, end, err := parseMonthParam(c.QueryParam("month"))
 	if err != nil {
-		return badRequest(c, "month must be YYYY-MM")
+		return badRequest(c, err.Error())
 	}
-	end := start.AddDate(0, 1, 0)
 
-	// Load projects (optionally filtered), then group by customer.
-	pq := h.DB.Model(&models.Project{}).Order("name ASC")
-	if projectID > 0 {
-		pq = pq.Where("_id = ?", projectID)
-	}
+	q := h.DB.Where(
+		"user_id = ? AND deleted = ? AND stop IS NOT NULL AND start >= ? AND start < ?",
+		userID, false, start, end,
+	)
 	if customerID > 0 {
-		pq = pq.Where("customer_id = ?", customerID)
+		q = q.Where(
+			`(customer_id = ? OR project_id IN (SELECT _id FROM project WHERE customer_id = ?))`,
+			customerID, customerID,
+		)
 	}
-	var projects []models.Project
-	if err := pq.Find(&projects).Error; err != nil {
+	if projectID > 0 {
+		q = q.Where(
+			`(project_id = ? OR _id IN (SELECT report_id FROM report_line WHERE project_id = ?))`,
+			projectID, projectID,
+		)
+	}
+	var reports []models.Report
+	if err := q.Order("start ASC").Find(&reports).Error; err != nil {
+		return internal(c, "failed to load reports")
+	}
+	if err := attachLines(h.DB, reports); err != nil {
+		return internal(c, "failed to load report lines")
+	}
+
+	projectsByID, err := loadReportProjects(h.DB, reports)
+	if err != nil {
 		return internal(c, "failed to load projects")
 	}
-
-	custIDs := make([]int64, 0)
-	seenCust := map[int64]bool{}
-	for _, p := range projects {
-		if !seenCust[p.CustomerID] {
-			seenCust[p.CustomerID] = true
-			custIDs = append(custIDs, p.CustomerID)
-		}
-	}
-	custByID := map[int64]models.Customer{}
-	if len(custIDs) > 0 {
-		var customers []models.Customer
-		if err := h.DB.Where("_id IN ?", custIDs).Find(&customers).Error; err != nil {
-			return internal(c, "failed to load customers")
-		}
-		for _, cu := range customers {
-			custByID[cu.ID] = cu
-		}
+	customersByID, err := loadReportCustomers(h.DB, reports, projectsByID)
+	if err != nil {
+		return internal(c, "failed to load customers")
 	}
 
-	// Group projects by customer
-	projectsByCust := map[int64][]models.Project{}
-	for _, p := range projects {
-		projectsByCust[p.CustomerID] = append(projectsByCust[p.CustomerID], p)
-	}
-
+	customers, grandTotal := buildMonthlyCustomers(reports, projectsByID, customersByID, customerID)
 	resp := dto.MonthlyReportResponse{
 		Month:      monthStr,
 		UserID:     userID,
 		CustomerID: customerID,
 		ProjectID:  projectID,
-		Customers:  []dto.MonthlyCustomer{},
+		TotalHours: grandTotal.Hours(),
+		TotalHM:    formatHM(grandTotal),
+		Customers:  customers,
 	}
-
-	var grandTotal time.Duration
-
-	// Stable customer order by name
-	type custKey struct {
-		id   int64
-		name string
-	}
-	keys := make([]custKey, 0, len(projectsByCust))
-	for cid := range projectsByCust {
-		name := ""
-		if cu, ok := custByID[cid]; ok {
-			name = cu.Name
-		}
-		keys = append(keys, custKey{id: cid, name: name})
-	}
-	// simple insertion sort by name
-	for i := 1; i < len(keys); i++ {
-		j := i
-		for j > 0 && keys[j].name < keys[j-1].name {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-			j--
-		}
-	}
-
-	for _, ck := range keys {
-		cu := custByID[ck.id]
-		mc := dto.MonthlyCustomer{
-			CustomerID:  cu.ID,
-			Name:        cu.Name,
-			Description: cu.Description,
-			Projects:    []dto.MonthlyProject{},
-		}
-		var custTotal time.Duration
-
-		for _, proj := range projectsByCust[ck.id] {
-			var reports []models.Report
-			err := h.DB.Where(
-				"user_id = ? AND project_id = ? AND start >= ? AND start < ? AND deleted = ? AND "+singleLineSQL("report._id"),
-				userID, proj.ID, start, end, false,
-			).Order("start ASC").Find(&reports).Error
-			if err != nil {
-				return internal(c, "failed to load reports")
-			}
-			if len(reports) == 0 {
-				continue
-			}
-			if err := attachLines(h.DB, reports); err != nil {
-				return internal(c, "failed to load report lines")
-			}
-
-			mp, projTotal := monthlyProjectFromReports(proj.ID, proj.Name, proj.CostCenter, reports)
-			custTotal += projTotal
-			mc.Projects = append(mc.Projects, mp)
-		}
-
-		var shared []models.Report
-		sharedQ := h.DB.Where(
-			`user_id = ? AND deleted = ? AND stop IS NOT NULL AND start >= ? AND start < ?
-			 AND (customer_id = ? OR project_id IN (SELECT _id FROM project WHERE customer_id = ?))
-			 AND report._id IN (SELECT report_id FROM report_line GROUP BY report_id HAVING COUNT(*) > 1)`,
-			userID, false, start, end, ck.id, ck.id,
-		)
-		if projectID > 0 {
-			sharedQ = sharedQ.Where(
-				"_id IN (SELECT report_id FROM report_line WHERE project_id = ?)",
-				projectID,
-			)
-		}
-		if err := sharedQ.Order("start ASC").Find(&shared).Error; err != nil {
-			return internal(c, "failed to load reports")
-		}
-		if len(shared) > 0 {
-			if err := attachLines(h.DB, shared); err != nil {
-				return internal(c, "failed to load report lines")
-			}
-			names := map[int64]string{}
-			for _, p := range projectsByCust[ck.id] {
-				names[p.ID] = p.Name
-			}
-			for i := range shared {
-				shared[i].Comment = models.DisplayComment(shared[i], names)
-			}
-			mp, projTotal := monthlyProjectFromReports(0, "Several projects", "", shared)
-			custTotal += projTotal
-			mc.Projects = append(mc.Projects, mp)
-		}
-
-		if len(mc.Projects) == 0 {
-			continue
-		}
-		mc.TotalHours = custTotal.Hours()
-		mc.TotalHM = formatHM(custTotal)
-		grandTotal += custTotal
-		resp.Customers = append(resp.Customers, mc)
-	}
-
-	resp.TotalHours = grandTotal.Hours()
-	resp.TotalHM = formatHM(grandTotal)
 	return ok(c, resp)
 }
 
-func monthlyProjectFromReports(id int64, name, cost string, reports []models.Report) (dto.MonthlyProject, time.Duration) {
-	mp := dto.MonthlyProject{
-		ProjectID:  id,
-		Name:       name,
-		CostCenter: cost,
-		Days:       []dto.MonthlyDay{},
-	}
-	var projTotal time.Duration
-	var curDay *dto.MonthlyDay
-	var curDate string
+func loadReportProjects(db *gorm.DB, reports []models.Report) (map[int64]models.Project, error) {
+	ids := map[int64]struct{}{}
 	for _, r := range reports {
-		if r.Stop == nil {
-			continue
+		if r.ProjectID > 0 {
+			ids[r.ProjectID] = struct{}{}
 		}
-		dur := r.Stop.Sub(r.Start)
-		if dur < 0 {
-			continue
-		}
-		dateStr := r.Start.Format("2006-01-02")
-		if curDay == nil || dateStr != curDate {
-			if curDay != nil {
-				mp.Days = append(mp.Days, *curDay)
+		for _, ln := range r.Lines {
+			if ln.ProjectID > 0 {
+				ids[ln.ProjectID] = struct{}{}
 			}
-			curDate = dateStr
-			curDay = &dto.MonthlyDay{Date: dateStr, Entries: []dto.MonthlyEntry{}}
 		}
-		curDay.Entries = append(curDay.Entries, dto.MonthlyEntry{
-			ID:      r.ID,
-			Start:   r.Start.Format("15:04"),
-			Stop:    r.Stop.Format("15:04"),
-			Hours:   dur.Hours(),
-			HM:      formatHM(dur),
-			Comment: r.Comment,
-		})
-		curDay.TotalHours += dur.Hours()
-		projTotal += dur
 	}
-	if curDay != nil {
-		mp.Days = append(mp.Days, *curDay)
+	out := map[int64]models.Project{}
+	if len(ids) == 0 {
+		return out, nil
 	}
-	for i := range mp.Days {
-		mp.Days[i].TotalHM = formatHM(time.Duration(mp.Days[i].TotalHours * float64(time.Hour)))
+	list := make([]int64, 0, len(ids))
+	for id := range ids {
+		list = append(list, id)
 	}
-	mp.TotalHours = projTotal.Hours()
-	mp.TotalHM = formatHM(projTotal)
-	return mp, projTotal
+	var projects []models.Project
+	if err := db.Where("_id IN ?", list).Find(&projects).Error; err != nil {
+		return nil, err
+	}
+	for _, p := range projects {
+		out[p.ID] = p
+	}
+	return out, nil
+}
+
+func loadReportCustomers(db *gorm.DB, reports []models.Report, projectsByID map[int64]models.Project) (map[int64]models.Customer, error) {
+	ids := map[int64]struct{}{}
+	for _, r := range reports {
+		if id := reportCustomerID(r, projectsByID); id > 0 {
+			ids[id] = struct{}{}
+		}
+	}
+	out := map[int64]models.Customer{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	list := make([]int64, 0, len(ids))
+	for id := range ids {
+		list = append(list, id)
+	}
+	var customers []models.Customer
+	if err := db.Where("_id IN ?", list).Find(&customers).Error; err != nil {
+		return nil, err
+	}
+	for _, cu := range customers {
+		out[cu.ID] = cu
+	}
+	return out, nil
+}
+
+func reportCustomerID(r models.Report, projectsByID map[int64]models.Project) int64 {
+	if r.CustomerID > 0 {
+		return r.CustomerID
+	}
+	pid, shared := models.AttributedProject(r)
+	if !shared {
+		if p, ok := projectsByID[pid]; ok && p.CustomerID > 0 {
+			return p.CustomerID
+		}
+	}
+	if len(r.Lines) > 0 {
+		if p, ok := projectsByID[r.Lines[0].ProjectID]; ok && p.CustomerID > 0 {
+			return p.CustomerID
+		}
+	}
+	if p, ok := projectsByID[r.ProjectID]; ok {
+		return p.CustomerID
+	}
+	return 0
+}
+
+// buildMonthlyCustomers groups a month the same way as the timesheet PDF:
+// one customer, then each day, and on each interval the project followed by
+// that project's comment. Several projects stay on the one interval.
+// filterCustomerID drops other customers when the request named one.
+func buildMonthlyCustomers(
+	reports []models.Report,
+	projectsByID map[int64]models.Project,
+	customersByID map[int64]models.Customer,
+	filterCustomerID int64,
+) ([]dto.MonthlyCustomer, time.Duration) {
+	byCust := map[int64][]models.Report{}
+	var custIDs []int64
+	seen := map[int64]bool{}
+	for _, r := range reports {
+		cid := reportCustomerID(r, projectsByID)
+		if filterCustomerID > 0 && cid != filterCustomerID {
+			continue
+		}
+		if !seen[cid] {
+			seen[cid] = true
+			custIDs = append(custIDs, cid)
+		}
+		byCust[cid] = append(byCust[cid], r)
+	}
+
+	sort.Slice(custIDs, func(i, j int) bool {
+		ni, nj := customerSortName(custIDs[i], customersByID), customerSortName(custIDs[j], customersByID)
+		if ni == nj {
+			return custIDs[i] < custIDs[j]
+		}
+		return ni < nj
+	})
+
+	names := map[int64]string{}
+	for id, p := range projectsByID {
+		names[id] = p.Name
+	}
+
+	out := make([]dto.MonthlyCustomer, 0, len(custIDs))
+	var grand time.Duration
+	for _, cid := range custIDs {
+		reps := byCust[cid]
+		days, total := groupReportsByDay(reps, names)
+		if len(days) == 0 {
+			continue
+		}
+		cu := customersByID[cid]
+		mc := dto.MonthlyCustomer{
+			CustomerID:  cid,
+			Name:        strings.TrimSpace(cu.Name),
+			Description: cu.Description,
+			TotalHours:  total.Hours(),
+			TotalHM:     formatHM(total),
+			Days:        monthlyDays(days),
+			Projects:    monthlyProjectSummaries(reps, projectsByID),
+		}
+		if mc.Name == "" {
+			if cid > 0 {
+				mc.Name = fmt.Sprintf("Customer #%d", cid)
+			} else {
+				mc.Name = "Unknown customer"
+			}
+		}
+		grand += total
+		out = append(out, mc)
+	}
+	return out, grand
+}
+
+func customerSortName(id int64, customersByID map[int64]models.Customer) string {
+	if cu, ok := customersByID[id]; ok {
+		if name := strings.ToLower(strings.TrimSpace(cu.Name)); name != "" {
+			return name
+		}
+	}
+	return fmt.Sprintf("customer #%d", id)
+}
+
+func monthlyDays(days []timesheetDay) []dto.MonthlyDay {
+	out := make([]dto.MonthlyDay, 0, len(days))
+	for _, day := range days {
+		md := dto.MonthlyDay{
+			Date:       day.Date,
+			TotalHours: day.Total.Hours(),
+			TotalHM:    formatHM(day.Total),
+			Entries:    make([]dto.MonthlyEntry, 0, len(day.Entries)),
+		}
+		for _, e := range day.Entries {
+			notes := make([]dto.MonthlyNote, 0, len(e.Notes))
+			for _, n := range e.Notes {
+				notes = append(notes, dto.MonthlyNote{Project: n.Project, Comment: n.Comment})
+			}
+			if len(notes) == 0 {
+				notes = []dto.MonthlyNote{{}}
+			}
+			md.Entries = append(md.Entries, dto.MonthlyEntry{
+				ID:    e.ID,
+				Start: e.Start,
+				Stop:  e.Stop,
+				Hours: e.Duration.Hours(),
+				HM:    e.Length,
+				Notes: notes,
+			})
+		}
+		out = append(out, md)
+	}
+	return out
+}
+
+func monthlyProjectSummaries(reports []models.Report, projectsByID map[int64]models.Project) []dto.MonthlyProject {
+	sums := summarizeReportsByProject(reports, projectsByID)
+	out := make([]dto.MonthlyProject, 0, len(sums))
+	for _, s := range sums {
+		row := dto.MonthlyProject{
+			ProjectID:  s.ProjectID,
+			Name:       s.Name,
+			Unit:       s.Unit,
+			TotalHours: s.Duration.Hours(),
+			TotalHM:    formatHM(s.Duration),
+		}
+		if p, ok := projectsByID[s.ProjectID]; ok {
+			row.CostCenter = p.CostCenter
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 func formatHM(d time.Duration) string {

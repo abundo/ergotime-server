@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 - A time report belongs to a customer. It can carry several project comments on the same start and stop. The timesheet counts that interval once. Hours are added to a project only when the report names that project alone. Shared intervals are listed as "Several projects" and are not split by moving time between projects.
 - The timesheet PDF lists the project first, then that project's comment. Several projects on one interval stay on one row.
+- The monthly report lists each day the same way: project, then that project's comment, with several projects kept on one interval, and a summary by project.
 - Sync protocol is 2. `/healthz` advertises `2`.
 
 ### Added

@@ -32,10 +32,12 @@ type timesheetNote struct {
 }
 
 type timesheetDayEntry struct {
-	Start  string
-	Stop   string
-	Length string
-	Notes  []timesheetNote
+	ID       int64
+	Start    string
+	Stop     string
+	Length   string
+	Duration time.Duration
+	Notes    []timesheetNote
 }
 
 type timesheetDay struct {
@@ -714,10 +716,12 @@ func groupReportsByDay(reports []models.Report, names map[int64]string) ([]times
 			cur = &timesheetDay{Date: dateStr}
 		}
 		cur.Entries = append(cur.Entries, timesheetDayEntry{
-			Start:  r.Start.Local().Format("15:04"),
-			Stop:   r.Stop.Local().Format("15:04"),
-			Length: formatHM(dur),
-			Notes:  notesForReport(r, names),
+			ID:       r.ID,
+			Start:    r.Start.Local().Format("15:04"),
+			Stop:     r.Stop.Local().Format("15:04"),
+			Length:   formatHM(dur),
+			Duration: dur,
+			Notes:    notesForReport(r, names),
 		})
 		cur.Total += dur
 		grandTotal += dur
