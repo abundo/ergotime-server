@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/abundo/ergotime-server/internal/dto"
 	"github.com/abundo/ergotime-server/internal/models"
@@ -78,14 +79,26 @@ func (h *ProjectsHandler) Create(c echo.Context) error {
 	if unit == "" {
 		unit = "hours"
 	}
+	isDefault := false
+	if req.IsDefault != nil {
+		isDefault = *req.IsDefault
+	}
 	item := models.Project{
 		CustomerID: req.CustomerID,
 		Name:       req.Name,
 		CostCenter: strings.TrimSpace(req.CostCenter),
 		Unit:       unit,
 		Active:     active,
+		IsDefault:  isDefault,
 	}
-	if err := h.DB.Create(&item).Error; err != nil {
+	if err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if item.IsDefault {
+			if err := clearOtherDefaultProjects(tx, item.CustomerID, 0); err != nil {
+				return err
+			}
+		}
+		return tx.Create(&item).Error
+	}); err != nil {
 		return internal(c, "failed to create project")
 	}
 	return created(c, item)
@@ -128,11 +141,33 @@ func (h *ProjectsHandler) Update(c echo.Context) error {
 	if req.Active != nil {
 		item.Active = *req.Active
 	}
+	if req.IsDefault != nil {
+		item.IsDefault = *req.IsDefault
+	}
 
-	if err := h.DB.Save(&item).Error; err != nil {
+	if err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if item.IsDefault {
+			if err := clearOtherDefaultProjects(tx, item.CustomerID, item.ID); err != nil {
+				return err
+			}
+		}
+		return tx.Save(&item).Error
+	}); err != nil {
 		return internal(c, "failed to update project")
 	}
 	return ok(c, item)
+}
+
+// clearOtherDefaultProjects unsets is_default on every other project of the customer.
+func clearOtherDefaultProjects(tx *gorm.DB, customerID, exceptID int64) error {
+	q := tx.Model(&models.Project{}).Where("customer_id = ? AND is_default = ?", customerID, true)
+	if exceptID > 0 {
+		q = q.Where("_id <> ?", exceptID)
+	}
+	return q.Updates(map[string]any{
+		"is_default": false,
+		"updated_at": time.Now().UTC(),
+	}).Error
 }
 
 func (h *ProjectsHandler) Delete(c echo.Context) error {

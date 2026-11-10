@@ -78,6 +78,9 @@ type ProjectRequest struct {
 	CostCenter string `json:"cost_center"`
 	Unit       string `json:"unit"` // e.g. "hours", "kilometers"
 	Active     *bool  `json:"active"`
+	// IsDefault, when set, makes this the customer's only default project.
+	// Omit the field to leave the current value unchanged.
+	IsDefault *bool `json:"is_default"`
 }
 
 // ReportRequest is create/update payload for reports.
@@ -201,17 +204,21 @@ type TimesheetReallocateMove struct {
 }
 
 // LegacyReport is the desktop sync payload (project_id replaces activityid).
+// Lines are the project/comment rows. One line is a normal project report.
+// Several lines share the same start and stop.
 type LegacyReport struct {
-	ID         int64      `json:"_id"`
-	UserID     int64      `json:"user_id"`
-	ProjectID  int64      `json:"project_id"`
-	Start      time.Time  `json:"start"`
-	Stop       *time.Time `json:"stop"`
-	Comment    string     `json:"comment"`
-	Modified   time.Time  `json:"modified"`
-	Seq        int64      `json:"seq"`
-	Deleted    int        `json:"deleted"`
-	ClientUUID string     `json:"client_uuid,omitempty"`
+	ID         int64               `json:"_id"`
+	UserID     int64               `json:"user_id"`
+	CustomerID int64               `json:"customer_id,omitempty"`
+	ProjectID  int64               `json:"project_id"`
+	Start      time.Time           `json:"start"`
+	Stop       *time.Time          `json:"stop"`
+	Comment    string              `json:"comment"`
+	Lines      []models.ReportLine `json:"lines,omitempty"`
+	Modified   time.Time           `json:"modified"`
+	Seq        int64               `json:"seq"`
+	Deleted    int                 `json:"deleted"`
+	ClientUUID string              `json:"client_uuid,omitempty"`
 }
 
 func LegacyReportFrom(r *models.Report) LegacyReport {
@@ -226,10 +233,12 @@ func LegacyReportFrom(r *models.Report) LegacyReport {
 	return LegacyReport{
 		ID:         r.ID,
 		UserID:     r.UserID,
+		CustomerID: r.CustomerID,
 		ProjectID:  r.ProjectID,
 		Start:      r.Start,
 		Stop:       r.Stop,
 		Comment:    r.Comment,
+		Lines:      r.Lines,
 		Modified:   r.Modified,
 		Seq:        r.Seq,
 		Deleted:    del,

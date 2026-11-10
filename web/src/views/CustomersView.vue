@@ -82,7 +82,7 @@
             v-model:visible="projectsDialogVisible"
             :header="projectsCustomer ? `Projects — ${projectsCustomer.name}` : 'Projects'"
             modal
-            style="width: min(720px, 96vw)"
+            style="width: min(860px, 96vw)"
             @hide="onProjectsDialogHide"
         >
             <div class="flex justify-content-end mb-3" v-if="auth.isAdmin">
@@ -103,6 +103,23 @@
                 <Column header="Active" style="width: 5rem">
                     <template #body="{ data }">
                         <Tag :severity="data.active ? 'success' : 'secondary'" :value="data.active ? 'Yes' : 'No'" />
+                    </template>
+                </Column>
+                <Column header="Default" style="width: 6rem">
+                    <template #body="{ data }">
+                        <Button
+                            v-if="auth.isAdmin"
+                            :icon="data.is_default ? 'pi pi-star-fill' : 'pi pi-star'"
+                            text
+                            rounded
+                            size="small"
+                            :severity="data.is_default ? 'warn' : 'secondary'"
+                            v-tooltip.top="data.is_default ? 'Default project. Click to clear' : 'Set as default'"
+                            :loading="defaultingId === data.id"
+                            @click="toggleDefault(data)"
+                        />
+                        <Tag v-else-if="data.is_default" severity="warn" value="Yes" />
+                        <span v-else class="muted">No</span>
                     </template>
                 </Column>
                 <Column v-if="auth.isAdmin" header="" style="width: 7rem">
@@ -162,6 +179,13 @@
                     <Checkbox v-model="projectForm.active" binary input-id="pactive" />
                     <label for="pactive">Active</label>
                 </div>
+                <div class="flex align-items-center gap-2">
+                    <Checkbox v-model="projectForm.is_default" binary input-id="pdefault" />
+                    <label for="pdefault">Default for this customer</label>
+                </div>
+                <small class="muted"
+                    >Only one project per customer is the default. Saving replaces the previous one.</small
+                >
             </div>
             <template #footer>
                 <Button label="Cancel" text @click="projectFormVisible = false" />
@@ -205,11 +229,13 @@ const projectsLoading = ref(false);
 const projectFormVisible = ref(false);
 const projectEditing = ref(null);
 const projectSaving = ref(false);
+const defaultingId = ref(null);
 const projectForm = reactive({
     name: "",
     cost_center: "",
     unit: "hours",
     active: true,
+    is_default: false,
 });
 
 function sortCustomers(list) {
@@ -313,12 +339,20 @@ async function loadProjects() {
         const { data } = await api.get("/projects", {
             params: { customer_id: projectsCustomer.value.id },
         });
-        projectItems.value = data.data || [];
+        projectItems.value = sortProjects(data.data || []);
     } catch (err) {
         toast.add({ severity: "error", summary: "Error", detail: errorMessage(err), life: 4000 });
     } finally {
         projectsLoading.value = false;
     }
+}
+
+function sortProjects(list) {
+    return [...list].sort((a, b) => {
+        const defaultDiff = Number(!!b.is_default) - Number(!!a.is_default);
+        if (defaultDiff !== 0) return defaultDiff;
+        return String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
+    });
 }
 
 function openProjectCreate() {
@@ -327,6 +361,7 @@ function openProjectCreate() {
     projectForm.cost_center = "";
     projectForm.unit = "hours";
     projectForm.active = true;
+    projectForm.is_default = false;
     projectFormVisible.value = true;
 }
 
@@ -336,6 +371,7 @@ function openProjectEdit(row) {
     projectForm.cost_center = row.cost_center || "";
     projectForm.unit = row.unit || "hours";
     projectForm.active = !!row.active;
+    projectForm.is_default = !!row.is_default;
     projectFormVisible.value = true;
 }
 
@@ -353,6 +389,7 @@ async function saveProject() {
             cost_center: projectForm.cost_center.trim(),
             unit: (projectForm.unit || "hours").trim() || "hours",
             active: projectForm.active,
+            is_default: projectForm.is_default,
         };
         if (projectEditing.value) {
             await api.put(`/projects/${projectEditing.value.id}`, body);
@@ -366,6 +403,26 @@ async function saveProject() {
         toast.add({ severity: "error", summary: "Error", detail: errorMessage(err), life: 4000 });
     } finally {
         projectSaving.value = false;
+    }
+}
+
+async function toggleDefault(row) {
+    if (!projectsCustomer.value || defaultingId.value) return;
+    defaultingId.value = row.id;
+    try {
+        await api.put(`/projects/${row.id}`, {
+            customer_id: projectsCustomer.value.id,
+            name: row.name,
+            cost_center: row.cost_center || "",
+            unit: row.unit || "hours",
+            active: !!row.active,
+            is_default: !row.is_default,
+        });
+        await loadProjects();
+    } catch (err) {
+        toast.add({ severity: "error", summary: "Error", detail: errorMessage(err), life: 4000 });
+    } finally {
+        defaultingId.value = null;
     }
 }
 

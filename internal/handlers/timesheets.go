@@ -24,11 +24,18 @@ type TimesheetsHandler struct {
 	DB *gorm.DB
 }
 
-type timesheetDayEntry struct {
-	Start   string
-	Stop    string
-	Length  string
+// timesheetNote is one project and the comment written for that project.
+// Several notes share one worked interval.
+type timesheetNote struct {
+	Project string
 	Comment string
+}
+
+type timesheetDayEntry struct {
+	Start  string
+	Stop   string
+	Length string
+	Notes  []timesheetNote
 }
 
 type timesheetDay struct {
@@ -211,8 +218,13 @@ func (h *TimesheetsHandler) buildTimesheetProjects(
 		sec   int64
 		count int
 	}
+	if err := attachLines(h.DB, reports); err != nil {
+		return dto.TimesheetProjectsResponse{}, err
+	}
+
 	byProj := map[int64]*agg{}
 	var grandSec int64
+	var shared agg
 	for _, r := range reports {
 		if r.Stop == nil {
 			continue
@@ -222,14 +234,20 @@ func (h *TimesheetsHandler) buildTimesheetProjects(
 			continue
 		}
 		sec := int64(d / time.Second)
-		a := byProj[r.ProjectID]
+		grandSec += sec
+		projectID, isShared := models.AttributedProject(r)
+		if isShared {
+			shared.sec += sec
+			shared.count++
+			continue
+		}
+		a := byProj[projectID]
 		if a == nil {
 			a = &agg{}
-			byProj[r.ProjectID] = a
+			byProj[projectID] = a
 		}
 		a.sec += sec
 		a.count++
-		grandSec += sec
 	}
 
 	// Show projects that have time, plus all active projects (targets for moves).
@@ -288,6 +306,19 @@ func (h *TimesheetsHandler) buildTimesheetProjects(
 		}
 		return strings.ToLower(rows[i].Name) < strings.ToLower(rows[j].Name)
 	})
+	if shared.sec > 0 || shared.count > 0 {
+		dur := time.Duration(shared.sec) * time.Second
+		rows = append(rows, dto.TimesheetProjectRow{
+			ProjectID:  0,
+			Name:       "Several projects",
+			Unit:       "hours",
+			TotalHours: dur.Hours(),
+			TotalHM:    formatHM(dur),
+			TotalSec:   shared.sec,
+			EntryCount: shared.count,
+			Active:     false,
+		})
+	}
 
 	grand := time.Duration(grandSec) * time.Second
 	return dto.TimesheetProjectsResponse{
@@ -423,7 +454,8 @@ func moveTimeBetweenProjects(
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where(
 			`project_id = ? AND deleted = ? AND stop IS NOT NULL AND start >= ? AND start < ?
-			 AND project_id IN (SELECT _id FROM project WHERE customer_id = ?)`,
+			 AND project_id IN (SELECT _id FROM project WHERE customer_id = ?)
+			 AND `+singleLineSQL("report._id"),
 			fromID, false, start, end, customerID,
 		).
 		Order("start DESC").
@@ -476,6 +508,9 @@ func moveTimeBetweenProjects(
 			if err := tx.Save(r).Error; err != nil {
 				return fmt.Errorf("reassign report: %w", err)
 			}
+			if err := retargetReportLine(tx, r.ID, toID, r.Comment); err != nil {
+				return fmt.Errorf("reassign line: %w", err)
+			}
 			remaining -= durSec
 			continue
 		}
@@ -503,19 +538,29 @@ func moveTimeBetweenProjects(
 			return fmt.Errorf("seq: %w", err)
 		}
 		moved := models.Report{
-			UserID:    r.UserID,
-			ProjectID: toID,
-			Start:     cut,
-			Stop:      &origStop,
-			Comment:   r.Comment,
-			Modified:  now,
-			Seq:       seqMove,
-			Deleted:   false,
-			Invoiced:  false,
+			UserID:     r.UserID,
+			CustomerID: r.CustomerID,
+			ProjectID:  toID,
+			Start:      cut,
+			Stop:       &origStop,
+			Comment:    r.Comment,
+			Modified:   now,
+			Seq:        seqMove,
+			Deleted:    false,
+			Invoiced:   false,
+		}
+		if moved.CustomerID == 0 {
+			moved.CustomerID = customerID
 		}
 		_ = moveDur // duration of moved piece; kept for clarity
 		if err := tx.Create(&moved).Error; err != nil {
 			return fmt.Errorf("split create: %w", err)
+		}
+		if err := retargetReportLine(tx, moved.ID, toID, r.Comment); err != nil {
+			return fmt.Errorf("split line: %w", err)
+		}
+		if err := retargetReportLine(tx, r.ID, fromID, r.Comment); err != nil {
+			return fmt.Errorf("keep line: %w", err)
 		}
 		remaining = 0
 	}
@@ -548,18 +593,27 @@ func (h *TimesheetsHandler) PDF(c echo.Context) error {
 
 	var reports []models.Report
 	err = h.DB.Where(
-		`project_id IN (SELECT _id FROM project WHERE customer_id = ?)
+		`(customer_id = ? OR project_id IN (SELECT _id FROM project WHERE customer_id = ?))
 		 AND deleted = ? AND stop IS NOT NULL AND start >= ? AND start < ?`,
-		customerID, false, start, end,
+		customerID, customerID, false, start, end,
 	).Order("start ASC").Find(&reports).Error
 	if err != nil {
 		return internal(c, "failed to load reports")
 	}
+	if err := attachLines(h.DB, reports); err != nil {
+		return internal(c, "failed to load report lines")
+	}
 
-	// Load projects referenced by reports (names + hourly rates for invoice summary).
+	// Load projects referenced by reports (names for the project column and the summary).
 	projIDs := map[int64]struct{}{}
 	for _, r := range reports {
-		projIDs[r.ProjectID] = struct{}{}
+		if len(r.Lines) == 0 {
+			projIDs[r.ProjectID] = struct{}{}
+			continue
+		}
+		for _, ln := range r.Lines {
+			projIDs[ln.ProjectID] = struct{}{}
+		}
 	}
 	projectsByID := map[int64]models.Project{}
 	if len(projIDs) > 0 {
@@ -576,6 +630,11 @@ func (h *TimesheetsHandler) PDF(c echo.Context) error {
 		}
 	}
 
+	names := map[int64]string{}
+	for id, p := range projectsByID {
+		names[id] = p.Name
+	}
+
 	projectLabel := ""
 	if len(projIDs) == 1 {
 		for id := range projIDs {
@@ -583,11 +642,9 @@ func (h *TimesheetsHandler) PDF(c echo.Context) error {
 				projectLabel = p.Name
 			}
 		}
-	} else if len(projIDs) > 1 {
-		projectLabel = fmt.Sprintf("%d projects", len(projIDs))
 	}
 
-	days, grandTotal := groupReportsByDay(reports)
+	days, grandTotal := groupReportsByDay(reports, names)
 	projectSummaries := summarizeReportsByProject(reports, projectsByID)
 	periodLabel := start.Format("January 2006")
 	customerLabel := strings.TrimSpace(cust.Description)
@@ -607,7 +664,36 @@ func (h *TimesheetsHandler) PDF(c echo.Context) error {
 	return c.Blob(http.StatusOK, "application/pdf", pdfBytes)
 }
 
-func groupReportsByDay(reports []models.Report) ([]timesheetDay, time.Duration) {
+func projectDisplayName(id int64, names map[int64]string) string {
+	if name := strings.TrimSpace(names[id]); name != "" {
+		return name
+	}
+	if id <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("Project #%d", id)
+}
+
+// notesForReport is one row per project on the interval. Each row keeps that
+// project's own comment. A report with no lines falls back to the report comment.
+func notesForReport(r models.Report, names map[int64]string) []timesheetNote {
+	if len(r.Lines) == 0 {
+		return []timesheetNote{{
+			Project: projectDisplayName(r.ProjectID, names),
+			Comment: r.Comment,
+		}}
+	}
+	notes := make([]timesheetNote, 0, len(r.Lines))
+	for _, ln := range r.Lines {
+		notes = append(notes, timesheetNote{
+			Project: projectDisplayName(ln.ProjectID, names),
+			Comment: ln.Comment,
+		})
+	}
+	return notes
+}
+
+func groupReportsByDay(reports []models.Report, names map[int64]string) ([]timesheetDay, time.Duration) {
 	var days []timesheetDay
 	var cur *timesheetDay
 	var grandTotal time.Duration
@@ -628,10 +714,10 @@ func groupReportsByDay(reports []models.Report) ([]timesheetDay, time.Duration) 
 			cur = &timesheetDay{Date: dateStr}
 		}
 		cur.Entries = append(cur.Entries, timesheetDayEntry{
-			Start:   r.Start.Local().Format("15:04"),
-			Stop:    r.Stop.Local().Format("15:04"),
-			Length:  formatHM(dur),
-			Comment: r.Comment,
+			Start:  r.Start.Local().Format("15:04"),
+			Stop:   r.Stop.Local().Format("15:04"),
+			Length: formatHM(dur),
+			Notes:  notesForReport(r, names),
 		})
 		cur.Total += dur
 		grandTotal += dur
@@ -653,6 +739,7 @@ func summarizeReportsByProject(
 		entries  int
 	}
 	byID := map[int64]*acc{}
+	var shared acc
 	for _, r := range reports {
 		if r.Stop == nil {
 			continue
@@ -661,16 +748,22 @@ func summarizeReportsByProject(
 		if dur < 0 {
 			continue
 		}
-		a := byID[r.ProjectID]
+		projectID, isShared := models.AttributedProject(r)
+		if isShared {
+			shared.duration += dur
+			shared.entries++
+			continue
+		}
+		a := byID[projectID]
 		if a == nil {
 			a = &acc{}
-			byID[r.ProjectID] = a
+			byID[projectID] = a
 		}
 		a.duration += dur
 		a.entries++
 	}
 
-	out := make([]timesheetProjectSummary, 0, len(byID))
+	out := make([]timesheetProjectSummary, 0, len(byID)+1)
 	for id, a := range byID {
 		s := timesheetProjectSummary{
 			ProjectID: id,
@@ -696,6 +789,15 @@ func summarizeReportsByProject(
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
+	if shared.entries > 0 {
+		out = append(out, timesheetProjectSummary{
+			ProjectID: 0,
+			Name:      "Several projects",
+			Unit:      "hours",
+			Duration:  shared.duration,
+			Entries:   shared.entries,
+		})
+	}
 	return out
 }
 
@@ -734,20 +836,41 @@ func generateTimesheetPDF(
 	pdf.Ln(6)
 
 	const (
-		colComment   = 135.0
+		colProject   = 48.0
+		colComment   = 87.0
 		colStart     = 15.0
 		colStop      = 15.0
 		colLength    = 15.0
 		wrapLineHt   = 3.3
 		paraGap      = 2.4
+		noteSep      = 2.2
 		cellPadY     = 1.5
-		tableWidth   = colComment + colStart + colStop + colLength
-		textWidth    = colComment - 2
+		tableWidth   = colProject + colComment + colStart + colStop + colLength
+		projectWidth = colProject - 2
+		commentWidth = colComment - 2
 		dayHeadingH  = 9.0
 		tableHeaderH = 7.0
 		dayTotalH    = 6.0
 		dayGapH      = 4.0
+		labelSpan    = colProject + colComment + colStart + colStop
 	)
+
+	// wrapPlain splits text already passed through the PDF encoding translator.
+	// The current font must be the one used when the text is drawn.
+	wrapPlain := func(text string, width float64) (lines []string, textH float64) {
+		if text == "" {
+			return []string{""}, wrapLineHt
+		}
+		wrapped := pdf.SplitLines([]byte(text), width)
+		lines = make([]string, 0, len(wrapped))
+		for _, w := range wrapped {
+			lines = append(lines, string(w))
+		}
+		if len(lines) == 0 {
+			lines = []string{""}
+		}
+		return lines, float64(len(lines)) * wrapLineHt
+	}
 
 	layoutComment := func(comment string) (paras [][]string, textH float64) {
 		if comment == "" {
@@ -757,7 +880,7 @@ func generateTimesheetPDF(
 		raw = strings.ReplaceAll(raw, "\r", "\n")
 		parts := strings.Split(raw, "\n")
 		for i, part := range parts {
-			wrapped := pdf.SplitLines([]byte(part), textWidth)
+			wrapped := pdf.SplitLines([]byte(part), commentWidth)
 			lines := make([]string, 0, len(wrapped))
 			for _, w := range wrapped {
 				lines = append(lines, string(w))
@@ -774,11 +897,40 @@ func generateTimesheetPDF(
 		return paras, textH
 	}
 
+	type laidNote struct {
+		projectLines []string
+		commentParas [][]string
+		h            float64
+	}
+
+	layoutEntry := func(e timesheetDayEntry) (notes []laidNote, rowH float64) {
+		src := e.Notes
+		if len(src) == 0 {
+			src = []timesheetNote{{}}
+		}
+		notes = make([]laidNote, len(src))
+		for i, n := range src {
+			pdf.SetFont("Arial", "B", 9)
+			pLines, pH := wrapPlain(tr(strings.TrimSpace(n.Project)), projectWidth)
+			pdf.SetFont("Arial", "", 9)
+			paras, cH := layoutComment(tr(strings.TrimSpace(n.Comment)))
+			h := pH
+			if cH > h {
+				h = cH
+			}
+			notes[i] = laidNote{projectLines: pLines, commentParas: paras, h: h}
+			rowH += h
+		}
+		if len(notes) > 1 {
+			rowH += noteSep * float64(len(notes)-1)
+		}
+		rowH += 2 * cellPadY
+		return notes, rowH
+	}
+
 	entryRowH := func(e timesheetDayEntry) float64 {
-		pdf.SetFont("Arial", "", 9)
-		comment := tr(strings.TrimSpace(e.Comment))
-		_, textH := layoutComment(comment)
-		return textH + 2*cellPadY
+		_, rowH := layoutEntry(e)
+		return rowH
 	}
 
 	dayContentH := func(day timesheetDay) float64 {
@@ -804,6 +956,7 @@ func generateTimesheetPDF(
 	writeTableHeader := func() {
 		pdf.SetFont("Arial", "B", 9)
 		pdf.SetFillColor(230, 230, 230)
+		pdf.CellFormat(colProject, tableHeaderH, "Project", "1", 0, "L", true, 0, "")
 		pdf.CellFormat(colComment, tableHeaderH, "Comment", "1", 0, "L", true, 0, "")
 		pdf.CellFormat(colStart, tableHeaderH, "Start", "1", 0, "C", true, 0, "")
 		pdf.CellFormat(colStop, tableHeaderH, "Stop", "1", 0, "C", true, 0, "")
@@ -811,15 +964,11 @@ func generateTimesheetPDF(
 	}
 
 	writeEntryRow := func(e timesheetDayEntry, stripe bool, allowPageBreak bool) {
-		pdf.SetFont("Arial", "", 9)
-		comment := tr(strings.TrimSpace(e.Comment))
-		paras, textH := layoutComment(comment)
-		rowH := textH + 2*cellPadY
+		laid, rowH := layoutEntry(e)
 
 		if allowPageBreak && pdf.GetY()+rowH > pageBottomY() {
 			pdf.AddPage()
 			writeTableHeader()
-			pdf.SetFont("Arial", "", 9)
 		}
 
 		x0, y0 := pdf.GetX(), pdf.GetY()
@@ -829,29 +978,52 @@ func generateTimesheetPDF(
 			pdf.Rect(x0, y0, tableWidth, rowH, "F")
 		}
 
-		pdf.Rect(x0, y0, colComment, rowH, "D")
+		pdf.SetDrawColor(0, 0, 0)
+		pdf.Rect(x0, y0, colProject, rowH, "D")
+		pdf.Rect(x0+colProject, y0, colComment, rowH, "D")
+		xTime := x0 + colProject + colComment
+		pdf.Rect(xTime, y0, colStart, rowH, "D")
+		pdf.Rect(xTime+colStart, y0, colStop, rowH, "D")
+		pdf.Rect(xTime+colStart+colStop, y0, colLength, rowH, "D")
+
 		y := y0 + cellPadY
-		for pi, lines := range paras {
-			if pi > 0 {
-				y += paraGap
+		for i, n := range laid {
+			if i > 0 {
+				sepY := y + noteSep/2
+				pdf.SetDrawColor(210, 210, 210)
+				pdf.Line(x0, sepY, x0+colProject+colComment, sepY)
+				pdf.SetDrawColor(0, 0, 0)
+				y += noteSep
 			}
-			for _, line := range lines {
-				pdf.SetXY(x0+1, y)
-				pdf.CellFormat(textWidth, wrapLineHt, line, "", 0, "L", false, 0, "")
-				y += wrapLineHt
+			pdf.SetFont("Arial", "B", 9)
+			py := y
+			for _, line := range n.projectLines {
+				pdf.SetXY(x0+1, py)
+				pdf.CellFormat(projectWidth, wrapLineHt, line, "", 0, "L", false, 0, "")
+				py += wrapLineHt
 			}
+			pdf.SetFont("Arial", "", 9)
+			cy := y
+			for pi, lines := range n.commentParas {
+				if pi > 0 {
+					cy += paraGap
+				}
+				for _, line := range lines {
+					pdf.SetXY(x0+colProject+1, cy)
+					pdf.CellFormat(commentWidth, wrapLineHt, line, "", 0, "L", false, 0, "")
+					cy += wrapLineHt
+				}
+			}
+			y += n.h
 		}
 
-		pdf.Rect(x0+colComment, y0, colStart, rowH, "D")
-		pdf.Rect(x0+colComment+colStart, y0, colStop, rowH, "D")
-		pdf.Rect(x0+colComment+colStart+colStop, y0, colLength, rowH, "D")
-
-		textY := y0 + cellPadY
-		pdf.SetXY(x0+colComment, textY)
+		pdf.SetFont("Arial", "", 9)
+		textY := y0 + (rowH-wrapLineHt)/2
+		pdf.SetXY(xTime, textY)
 		pdf.CellFormat(colStart, wrapLineHt, e.Start, "", 0, "C", false, 0, "")
-		pdf.SetXY(x0+colComment+colStart, textY)
+		pdf.SetXY(xTime+colStart, textY)
 		pdf.CellFormat(colStop, wrapLineHt, e.Stop, "", 0, "C", false, 0, "")
-		pdf.SetXY(x0+colComment+colStart+colStop, textY)
+		pdf.SetXY(xTime+colStart+colStop, textY)
 		pdf.CellFormat(colLength, wrapLineHt, e.Length, "", 0, "C", false, 0, "")
 		pdf.SetXY(x0, y0+rowH)
 	}
@@ -893,7 +1065,7 @@ func generateTimesheetPDF(
 		}
 
 		pdf.SetFont("Arial", "B", 9)
-		pdf.CellFormat(colComment+colStart+colStop, dayTotalH, "Day total", "", 0, "R", false, 0, "")
+		pdf.CellFormat(labelSpan, dayTotalH, "Day total", "", 0, "R", false, 0, "")
 		pdf.CellFormat(colLength, dayTotalH, formatHM(day.Total), "", 1, "C", false, 0, "")
 	}
 
@@ -903,7 +1075,7 @@ func generateTimesheetPDF(
 	}
 	pdf.SetFont("Arial", "B", 12)
 	pdf.SetFillColor(220, 235, 250)
-	pdf.CellFormat(colComment+colStart+colStop, 9, "Total", "1", 0, "R", true, 0, "")
+	pdf.CellFormat(labelSpan, 9, "Total", "1", 0, "R", true, 0, "")
 	pdf.CellFormat(colLength, 9, formatHM(grandTotal), "1", 1, "C", true, 0, "")
 
 	writeProjectSummaryTable(pdf, tr, projectSummaries, grandTotal, tableWidth)

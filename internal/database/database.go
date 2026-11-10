@@ -61,6 +61,7 @@ func migrate(db *gorm.DB) error {
 		&models.Customer{},
 		&models.Project{},
 		&models.Report{},
+		&models.ReportLine{},
 	); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
@@ -101,6 +102,29 @@ func migrate(db *gorm.DB) error {
 		log.Printf("warning: project unit default: %v", err)
 	}
 
+	// One default project per customer. Keep the lowest id if older rows conflict.
+	if err := db.Exec(`
+		WITH keeper AS (
+			SELECT DISTINCT ON (customer_id) _id
+			FROM project
+			WHERE is_default
+			ORDER BY customer_id, _id
+		)
+		UPDATE project
+		SET is_default = false
+		WHERE is_default
+		  AND _id NOT IN (SELECT _id FROM keeper)
+	`).Error; err != nil {
+		log.Printf("warning: project default dedupe: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_project_one_default_per_customer
+		ON project (customer_id)
+		WHERE is_default
+	`).Error; err != nil {
+		return fmt.Errorf("project default index: %w", err)
+	}
+
 	// Ensure report.seq has a usable sequence even if AutoMigrate did not
 	// create a serial for a non-primary column.
 	// setval cannot take 0 (PG sequences start at 1). Empty table: setval(1, false)
@@ -114,6 +138,29 @@ func migrate(db *gorm.DB) error {
 		);
 	`).Error; err != nil {
 		log.Printf("warning: report seq sequence setup: %v", err)
+	}
+
+	// Reports belong to a customer. Existing rows take the customer's id from
+	// their project, and gain one comment line so older entries stay single-project.
+	if err := db.Exec(`
+		UPDATE report AS r
+		SET customer_id = p.customer_id
+		FROM project AS p
+		WHERE r.project_id = p._id
+		  AND (r.customer_id IS NULL OR r.customer_id = 0)
+	`).Error; err != nil {
+		log.Printf("warning: report customer backfill: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO report_line (report_id, project_id, comment, position)
+		SELECT r._id, r.project_id, COALESCE(r.comment, ''), 0
+		FROM report r
+		WHERE r.project_id > 0
+		  AND NOT EXISTS (
+			SELECT 1 FROM report_line l WHERE l.report_id = r._id
+		  )
+	`).Error; err != nil {
+		log.Printf("warning: report line backfill: %v", err)
 	}
 
 	// Idempotent client creates: unique client_uuid when set (partial index so

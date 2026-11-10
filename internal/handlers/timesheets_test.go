@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"bytes"
+	"compress/zlib"
+	"io"
 	"testing"
 	"time"
 
@@ -47,6 +50,28 @@ func TestSummarizeReportsByProject(t *testing.T) {
 	}
 	if got[2].Duration != 4*time.Hour || got[2].Unit != "kilometers" {
 		t.Errorf("Travel: duration=%v unit=%q", got[2].Duration, got[2].Unit)
+	}
+}
+
+func TestSummarizeReportsByProject_SharedIntervalOnce(t *testing.T) {
+	start := time.Date(2026, 8, 1, 9, 0, 0, 0, time.Local)
+	stop := start.Add(150 * time.Minute)
+	reports := []models.Report{
+		{ProjectID: 1, Start: start, Stop: &stop, Lines: []models.ReportLine{
+			{ProjectID: 1, Comment: "a"},
+			{ProjectID: 2, Comment: "b"},
+		}},
+	}
+	projects := map[int64]models.Project{
+		1: {ID: 1, Name: "Alpha", Unit: "hours"},
+		2: {ID: 2, Name: "Beta", Unit: "hours"},
+	}
+	got := summarizeReportsByProject(reports, projects)
+	if len(got) != 1 {
+		t.Fatalf("expected only the shared row, got %+v", got)
+	}
+	if got[0].Name != "Several projects" || got[0].Duration != 150*time.Minute {
+		t.Fatalf("got %+v", got[0])
 	}
 }
 
@@ -103,6 +128,107 @@ func TestParseHMDuration(t *testing.T) {
 			t.Errorf("parseHMDuration(%q): expected error, got %v", tc.in, got)
 		}
 	}
+}
+
+func TestGroupReportsByDay_ProjectThenOwnComment(t *testing.T) {
+	start := time.Date(2026, 8, 3, 9, 15, 0, 0, time.Local)
+	stop := start.Add(90 * time.Minute)
+	reports := []models.Report{
+		{
+			ProjectID: 1,
+			Start:     start,
+			Stop:      &stop,
+			Comment:   "Alpha\nfixed the valve\n\nBeta\ncalled the site",
+			Lines: []models.ReportLine{
+				{ProjectID: 1, Comment: "fixed the valve"},
+				{ProjectID: 2, Comment: "called the site"},
+			},
+		},
+	}
+	names := map[int64]string{1: "Alpha", 2: "Beta"}
+	days, total := groupReportsByDay(reports, names)
+	if total != 90*time.Minute || len(days) != 1 || len(days[0].Entries) != 1 {
+		t.Fatalf("days=%+v total=%v", days, total)
+	}
+	notes := days[0].Entries[0].Notes
+	if len(notes) != 2 {
+		t.Fatalf("notes: %+v", notes)
+	}
+	if notes[0].Project != "Alpha" || notes[0].Comment != "fixed the valve" {
+		t.Fatalf("first note: %+v", notes[0])
+	}
+	if notes[1].Project != "Beta" || notes[1].Comment != "called the site" {
+		t.Fatalf("second note: %+v", notes[1])
+	}
+	if days[0].Entries[0].Start != "09:15" || days[0].Entries[0].Length != "01:30" {
+		t.Fatalf("time: %+v", days[0].Entries[0])
+	}
+}
+
+func TestGenerateTimesheetPDF_ProjectColumn(t *testing.T) {
+	days := []timesheetDay{{
+		Date: "2026-08-03",
+		Entries: []timesheetDayEntry{{
+			Start:  "09:15",
+			Stop:   "10:45",
+			Length: "01:30",
+			Notes: []timesheetNote{
+				{Project: "Alpha", Comment: "fixed the valve"},
+				{Project: "Beta", Comment: "called the site"},
+			},
+		}},
+		Total: 90 * time.Minute,
+	}}
+	pdfBytes, err := generateTimesheetPDF("Acme", "", "August 2026", days, 90*time.Minute, []timesheetProjectSummary{{
+		Name: "Several projects", Unit: "hours", Duration: 90 * time.Minute, Entries: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := pdfStreams(t, pdfBytes)
+	for _, s := range []string{"Project", "Comment", "Alpha", "fixed the valve", "Beta", "called the site", "09:15", "01:30"} {
+		if !bytes.Contains(plain, []byte(s)) {
+			t.Errorf("pdf missing %q", s)
+		}
+	}
+	// Project column is written before the comment column in the day table header.
+	proj := bytes.Index(plain, []byte("(Project)"))
+	comment := bytes.Index(plain, []byte("(Comment)"))
+	if proj < 0 || comment < 0 || proj > comment {
+		t.Fatalf("header order project=%d comment=%d", proj, comment)
+	}
+}
+
+func pdfStreams(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	rest := b
+	for {
+		i := bytes.Index(rest, []byte("stream\n"))
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len("stream\n"):]
+		j := bytes.Index(rest, []byte("\nendstream"))
+		if j < 0 {
+			break
+		}
+		r, err := zlib.NewReader(bytes.NewReader(rest[:j]))
+		rest = rest[j+len("\nendstream"):]
+		if err != nil {
+			continue
+		}
+		decoded, err := io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out.Write(decoded)
+	}
+	if out.Len() == 0 {
+		t.Fatal("no pdf streams")
+	}
+	return out.Bytes()
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }

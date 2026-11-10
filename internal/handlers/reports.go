@@ -51,14 +51,18 @@ func (h *ReportsHandler) List(c echo.Context) error {
 		if err != nil {
 			return badRequest(c, "invalid project_id")
 		}
-		q = q.Where("project_id = ?", id)
+		q = q.Where("project_id = ? OR _id IN (SELECT report_id FROM report_line WHERE project_id = ?)", id, id)
 	}
 	if cid := c.QueryParam("customer_id"); cid != "" {
 		id, err := strconv.ParseInt(cid, 10, 64)
 		if err != nil {
 			return badRequest(c, "invalid customer_id")
 		}
-		q = q.Where("project_id IN (?)", h.DB.Model(&models.Project{}).Select("_id").Where("customer_id = ?", id))
+		q = q.Where(
+			"customer_id = ? OR project_id IN (?)",
+			id,
+			h.DB.Model(&models.Project{}).Select("_id").Where("customer_id = ?", id),
+		)
 	}
 	if c.QueryParam("include_deleted") != "1" && c.QueryParam("include_deleted") != "true" {
 		q = q.Where("deleted = ?", false)
@@ -96,6 +100,9 @@ func (h *ReportsHandler) List(c echo.Context) error {
 	if err := q.Find(&items).Error; err != nil {
 		return internal(c, "failed to list reports")
 	}
+	if err := attachLines(h.DB, items); err != nil {
+		return internal(c, "failed to load report lines")
+	}
 
 	if acceptsLegacy(c) {
 		out := make([]dto.LegacyReport, 0, len(items))
@@ -122,6 +129,11 @@ func (h *ReportsHandler) Get(c echo.Context) error {
 	if !canAccessReport(c, &item) {
 		return notFound(c, "report not found")
 	}
+	loaded := []models.Report{item}
+	if err := attachLines(h.DB, loaded); err != nil {
+		return internal(c, "failed to load report lines")
+	}
+	item = loaded[0]
 	if acceptsLegacy(c) {
 		return okData(c, dto.LegacyReportFrom(&item))
 	}
@@ -168,6 +180,9 @@ func (h *ReportsHandler) Sync(c echo.Context) error {
 	if err := q.Find(&items).Error; err != nil {
 		return internal(c, "failed to sync reports")
 	}
+	if err := attachLines(h.DB, items); err != nil {
+		return internal(c, "failed to load report lines")
+	}
 
 	out := make([]dto.LegacyReport, 0, len(items))
 	for i := range items {
@@ -189,14 +204,8 @@ func (h *ReportsHandler) Create(c echo.Context) error {
 	if item.UserID == 0 || !isAdmin {
 		item.UserID = selfID
 	}
-	if item.ProjectID == 0 {
-		return badRequest(c, "project_id is required")
-	}
 	if item.Start.IsZero() {
 		return badRequest(c, "start is required")
-	}
-	if !h.projectExists(item.ProjectID) {
-		return badRequest(c, "project not found")
 	}
 
 	// Idempotent create: if client_uuid already exists for this user, return it.
@@ -205,6 +214,9 @@ func (h *ReportsHandler) Create(c echo.Context) error {
 		err := h.DB.Where("client_uuid = ? AND user_id = ?", *item.ClientUUID, item.UserID).
 			First(&existing).Error
 		if err == nil {
+			loaded := []models.Report{existing}
+			_ = attachLines(h.DB, loaded)
+			existing = loaded[0]
 			return h.respondReport(c, &existing, false)
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -219,11 +231,20 @@ func (h *ReportsHandler) Create(c echo.Context) error {
 	item.Seq = seq
 	item.Modified = time.Now().UTC()
 
-	if err := h.DB.Create(item).Error; err != nil {
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		return writeReport(tx, item, true)
+	})
+	if err != nil {
+		if msg, ok := lineError(err); ok {
+			return badRequest(c, msg)
+		}
 		if item.ClientUUID != nil && *item.ClientUUID != "" {
 			var existing models.Report
 			if err2 := h.DB.Where("client_uuid = ? AND user_id = ?", *item.ClientUUID, item.UserID).
 				First(&existing).Error; err2 == nil {
+				loaded := []models.Report{existing}
+				_ = attachLines(h.DB, loaded)
+				existing = loaded[0]
 				return h.respondReport(c, &existing, false)
 			}
 		}
@@ -268,13 +289,6 @@ func (h *ReportsHandler) Update(c echo.Context) error {
 	if !middleware.IsAdminFromContext(c) {
 		updated.UserID = existing.UserID
 	}
-	if updated.ProjectID == 0 {
-		return badRequest(c, "project_id is required")
-	}
-	if !h.projectExists(updated.ProjectID) {
-		return badRequest(c, "project not found")
-	}
-
 	seq, err := database.NextReportSeq(h.DB)
 	if err != nil {
 		return internal(c, "failed to allocate seq")
@@ -283,7 +297,13 @@ func (h *ReportsHandler) Update(c echo.Context) error {
 	updated.Modified = time.Now().UTC()
 	updated.ID = id
 
-	if err := h.DB.Save(updated).Error; err != nil {
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		return writeReport(tx, updated, false)
+	})
+	if err != nil {
+		if msg, ok := lineError(err); ok {
+			return badRequest(c, msg)
+		}
 		return internal(c, "failed to update report")
 	}
 
@@ -334,22 +354,24 @@ type BatchPushRequest struct {
 
 // BatchCreateItem is one new report in a batch push.
 type BatchCreateItem struct {
-	ClientUUID string `json:"client_uuid"`
-	ProjectID  int64  `json:"project_id"`
-	Start      string `json:"start"`
-	Stop       string `json:"stop"`
-	Comment    string `json:"comment"`
-	UserID     int64  `json:"user_id"`
+	ClientUUID string              `json:"client_uuid"`
+	ProjectID  int64               `json:"project_id"`
+	Start      string              `json:"start"`
+	Stop       string              `json:"stop"`
+	Comment    string              `json:"comment"`
+	Lines      []models.ReportLine `json:"lines"`
+	UserID     int64               `json:"user_id"`
 }
 
 // BatchUpdateItem is one existing report update in a batch push.
 type BatchUpdateItem struct {
-	ID         int64  `json:"id"`
-	ProjectID  int64  `json:"project_id"`
-	Start      string `json:"start"`
-	Stop       string `json:"stop"`
-	Comment    string `json:"comment"`
-	ClientUUID string `json:"client_uuid"`
+	ID         int64               `json:"id"`
+	ProjectID  int64               `json:"project_id"`
+	Start      string              `json:"start"`
+	Stop       string              `json:"stop"`
+	Comment    string              `json:"comment"`
+	Lines      []models.ReportLine `json:"lines"`
+	ClientUUID string              `json:"client_uuid"`
 }
 
 // BatchPushResponse returns server state after each op.
@@ -421,15 +443,11 @@ func (h *ReportsHandler) Batch(c echo.Context) error {
 			ProjectID: in.ProjectID,
 			Comment:   in.Comment,
 			UserID:    in.UserID,
+			Lines:     in.Lines,
+			LinesSet:  in.Lines != nil,
 		}
 		if item.UserID == 0 || !isAdmin {
 			item.UserID = selfID
-		}
-		if item.ProjectID == 0 {
-			return badRequest(c, "create: project_id is required")
-		}
-		if !h.projectExists(item.ProjectID) {
-			return badRequest(c, "create: project not found")
 		}
 		start, err := dto.ParseTime(in.Start)
 		if err != nil || start.IsZero() {
@@ -448,7 +466,9 @@ func (h *ReportsHandler) Batch(c echo.Context) error {
 			var existing models.Report
 			err := h.DB.Where("client_uuid = ? AND user_id = ?", cu, item.UserID).First(&existing).Error
 			if err == nil {
-				out.Created = append(out.Created, existing)
+				loaded := []models.Report{existing}
+				_ = attachLines(h.DB, loaded)
+				out.Created = append(out.Created, loaded[0])
 				continue
 			}
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -461,12 +481,20 @@ func (h *ReportsHandler) Batch(c echo.Context) error {
 		}
 		item.Seq = seq
 		item.Modified = time.Now().UTC()
-		if err := h.DB.Create(item).Error; err != nil {
+		err = h.DB.Transaction(func(tx *gorm.DB) error {
+			return writeReport(tx, item, true)
+		})
+		if err != nil {
+			if msg, ok := lineError(err); ok {
+				return badRequest(c, "create: "+msg)
+			}
 			if item.ClientUUID != nil {
 				var existing models.Report
 				if err2 := h.DB.Where("client_uuid = ? AND user_id = ?", *item.ClientUUID, item.UserID).
 					First(&existing).Error; err2 == nil {
-					out.Created = append(out.Created, existing)
+					loaded := []models.Report{existing}
+					_ = attachLines(h.DB, loaded)
+					out.Created = append(out.Created, loaded[0])
 					continue
 				}
 			}
@@ -490,10 +518,11 @@ func (h *ReportsHandler) Batch(c echo.Context) error {
 			return notFound(c, fmt.Sprintf("report %d not found", in.ID))
 		}
 		if in.ProjectID > 0 {
-			if !h.projectExists(in.ProjectID) {
-				return badRequest(c, "update: project not found")
-			}
 			existing.ProjectID = in.ProjectID
+		}
+		if in.Lines != nil {
+			existing.Lines = in.Lines
+			existing.LinesSet = true
 		}
 		if in.Start != "" {
 			t, err := dto.ParseTime(in.Start)
@@ -525,7 +554,13 @@ func (h *ReportsHandler) Batch(c echo.Context) error {
 		existing.Seq = seq
 		existing.Modified = time.Now().UTC()
 		existing.Deleted = false
-		if err := h.DB.Save(&existing).Error; err != nil {
+		err = h.DB.Transaction(func(tx *gorm.DB) error {
+			return writeReport(tx, &existing, false)
+		})
+		if err != nil {
+			if msg, ok := lineError(err); ok {
+				return badRequest(c, "update: "+msg)
+			}
 			return internal(c, "failed to update report")
 		}
 		out.Updated = append(out.Updated, existing)
@@ -641,7 +676,7 @@ func (h *ReportsHandler) Monthly(c echo.Context) error {
 		for _, proj := range projectsByCust[ck.id] {
 			var reports []models.Report
 			err := h.DB.Where(
-				"user_id = ? AND project_id = ? AND start >= ? AND start < ? AND deleted = ?",
+				"user_id = ? AND project_id = ? AND start >= ? AND start < ? AND deleted = ? AND "+singleLineSQL("report._id"),
 				userID, proj.ID, start, end, false,
 			).Order("start ASC").Find(&reports).Error
 			if err != nil {
@@ -650,53 +685,43 @@ func (h *ReportsHandler) Monthly(c echo.Context) error {
 			if len(reports) == 0 {
 				continue
 			}
+			if err := attachLines(h.DB, reports); err != nil {
+				return internal(c, "failed to load report lines")
+			}
 
-			mp := dto.MonthlyProject{
-				ProjectID:  proj.ID,
-				Name:       proj.Name,
-				CostCenter: proj.CostCenter,
-				Days:       []dto.MonthlyDay{},
-			}
-			var projTotal time.Duration
-			var curDay *dto.MonthlyDay
-			var curDate string
+			mp, projTotal := monthlyProjectFromReports(proj.ID, proj.Name, proj.CostCenter, reports)
+			custTotal += projTotal
+			mc.Projects = append(mc.Projects, mp)
+		}
 
-			for _, r := range reports {
-				if r.Stop == nil {
-					continue
-				}
-				dur := r.Stop.Sub(r.Start)
-				if dur < 0 {
-					continue
-				}
-				dateStr := r.Start.Format("2006-01-02")
-				if curDay == nil || dateStr != curDate {
-					if curDay != nil {
-						mp.Days = append(mp.Days, *curDay)
-					}
-					curDate = dateStr
-					curDay = &dto.MonthlyDay{Date: dateStr, Entries: []dto.MonthlyEntry{}}
-				}
-				entry := dto.MonthlyEntry{
-					ID:      r.ID,
-					Start:   r.Start.Format("15:04"),
-					Stop:    r.Stop.Format("15:04"),
-					Hours:   dur.Hours(),
-					HM:      formatHM(dur),
-					Comment: r.Comment,
-				}
-				curDay.Entries = append(curDay.Entries, entry)
-				curDay.TotalHours += dur.Hours()
-				projTotal += dur
+		var shared []models.Report
+		sharedQ := h.DB.Where(
+			`user_id = ? AND deleted = ? AND stop IS NOT NULL AND start >= ? AND start < ?
+			 AND (customer_id = ? OR project_id IN (SELECT _id FROM project WHERE customer_id = ?))
+			 AND report._id IN (SELECT report_id FROM report_line GROUP BY report_id HAVING COUNT(*) > 1)`,
+			userID, false, start, end, ck.id, ck.id,
+		)
+		if projectID > 0 {
+			sharedQ = sharedQ.Where(
+				"_id IN (SELECT report_id FROM report_line WHERE project_id = ?)",
+				projectID,
+			)
+		}
+		if err := sharedQ.Order("start ASC").Find(&shared).Error; err != nil {
+			return internal(c, "failed to load reports")
+		}
+		if len(shared) > 0 {
+			if err := attachLines(h.DB, shared); err != nil {
+				return internal(c, "failed to load report lines")
 			}
-			if curDay != nil {
-				mp.Days = append(mp.Days, *curDay)
+			names := map[int64]string{}
+			for _, p := range projectsByCust[ck.id] {
+				names[p.ID] = p.Name
 			}
-			for i := range mp.Days {
-				mp.Days[i].TotalHM = formatHM(time.Duration(mp.Days[i].TotalHours * float64(time.Hour)))
+			for i := range shared {
+				shared[i].Comment = models.DisplayComment(shared[i], names)
 			}
-			mp.TotalHours = projTotal.Hours()
-			mp.TotalHM = formatHM(projTotal)
+			mp, projTotal := monthlyProjectFromReports(0, "Several projects", "", shared)
 			custTotal += projTotal
 			mc.Projects = append(mc.Projects, mp)
 		}
@@ -713,6 +738,54 @@ func (h *ReportsHandler) Monthly(c echo.Context) error {
 	resp.TotalHours = grandTotal.Hours()
 	resp.TotalHM = formatHM(grandTotal)
 	return ok(c, resp)
+}
+
+func monthlyProjectFromReports(id int64, name, cost string, reports []models.Report) (dto.MonthlyProject, time.Duration) {
+	mp := dto.MonthlyProject{
+		ProjectID:  id,
+		Name:       name,
+		CostCenter: cost,
+		Days:       []dto.MonthlyDay{},
+	}
+	var projTotal time.Duration
+	var curDay *dto.MonthlyDay
+	var curDate string
+	for _, r := range reports {
+		if r.Stop == nil {
+			continue
+		}
+		dur := r.Stop.Sub(r.Start)
+		if dur < 0 {
+			continue
+		}
+		dateStr := r.Start.Format("2006-01-02")
+		if curDay == nil || dateStr != curDate {
+			if curDay != nil {
+				mp.Days = append(mp.Days, *curDay)
+			}
+			curDate = dateStr
+			curDay = &dto.MonthlyDay{Date: dateStr, Entries: []dto.MonthlyEntry{}}
+		}
+		curDay.Entries = append(curDay.Entries, dto.MonthlyEntry{
+			ID:      r.ID,
+			Start:   r.Start.Format("15:04"),
+			Stop:    r.Stop.Format("15:04"),
+			Hours:   dur.Hours(),
+			HM:      formatHM(dur),
+			Comment: r.Comment,
+		})
+		curDay.TotalHours += dur.Hours()
+		projTotal += dur
+	}
+	if curDay != nil {
+		mp.Days = append(mp.Days, *curDay)
+	}
+	for i := range mp.Days {
+		mp.Days[i].TotalHM = formatHM(time.Duration(mp.Days[i].TotalHours * float64(time.Hour)))
+	}
+	mp.TotalHours = projTotal.Hours()
+	mp.TotalHM = formatHM(projTotal)
+	return mp, projTotal
 }
 
 func formatHM(d time.Duration) string {
@@ -782,6 +855,22 @@ func (h *ReportsHandler) bindReport(c echo.Context, base *models.Report) (*model
 			item.Comment = s
 		} else if s, ok := raw["commment"].(string); ok { // legacy typo
 			item.Comment = s
+		}
+		if rawLines, ok := raw["lines"].([]any); ok {
+			item.LinesSet = true
+			item.Lines = nil
+			for _, rawLn := range rawLines {
+				m, ok := rawLn.(map[string]any)
+				if !ok {
+					continue
+				}
+				pid, _ := asInt64(m["project_id"])
+				comment, _ := m["comment"].(string)
+				item.Lines = append(item.Lines, models.ReportLine{
+					ProjectID: pid,
+					Comment:   comment,
+				})
+			}
 		}
 		if v, ok := asBool(raw["deleted"]); ok {
 			item.Deleted = v

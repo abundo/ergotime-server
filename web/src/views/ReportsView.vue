@@ -43,12 +43,7 @@
                 </div>
                 <div class="flex flex-column gap-1">
                     <label>To</label>
-                    <InputText
-                        v-model="filters.to"
-                        placeholder="YYYY-MM-DD"
-                        class="w-full"
-                        style="min-width: 10rem"
-                    />
+                    <InputText v-model="filters.to" placeholder="YYYY-MM-DD" class="w-full" style="min-width: 10rem" />
                 </div>
                 <Button label="Filter" icon="pi pi-filter" @click="load" />
             </div>
@@ -68,12 +63,12 @@
                 <Column field="id" header="ID" style="width: 5rem" />
                 <Column header="Customer">
                     <template #body="{ data }">
-                        {{ projectCustomerName(data.project_id) }}
+                        {{ reportCustomerName(data) }}
                     </template>
                 </Column>
                 <Column header="Project">
                     <template #body="{ data }">
-                        {{ projectName(data.project_id) }}
+                        {{ reportProjectLabel(data) }}
                     </template>
                 </Column>
                 <Column header="Start">
@@ -82,7 +77,11 @@
                 <Column header="Stop">
                     <template #body="{ data }">{{ formatDateTime(data.stop) }}</template>
                 </Column>
-                <Column field="comment" header="Comment" />
+                <Column header="Comment">
+                    <template #body="{ data }">
+                        <span class="report-comment">{{ reportCommentLabel(data) }}</span>
+                    </template>
+                </Column>
                 <Column header="" style="width: 8rem">
                     <template #body="{ data }">
                         <Button icon="pi pi-pencil" text rounded size="small" @click="openEdit(data)" />
@@ -103,7 +102,7 @@
             v-model:visible="dialogVisible"
             :header="editing ? 'Edit report' : 'New report'"
             modal
-            style="width: min(520px, 95vw)"
+            style="width: min(640px, 95vw)"
         >
             <div class="flex flex-column gap-3">
                 <div class="flex flex-column gap-1">
@@ -119,35 +118,49 @@
                     />
                 </div>
                 <div class="flex flex-column gap-1">
-                    <label>Project</label>
-                    <Select
-                        v-model="form.project_id"
-                        :options="formProjectOptions"
-                        option-label="label"
-                        option-value="value"
-                        placeholder="Select project"
-                        class="w-full"
-                    />
-                </div>
-                <div class="flex flex-column gap-1">
                     <label>Start</label>
-                    <InputText
-                        v-model="form.start"
-                        placeholder="YYYY-MM-DD HH:MM"
-                        class="w-full"
-                    />
+                    <InputText v-model="form.start" placeholder="YYYY-MM-DD HH:MM" class="w-full" />
                 </div>
                 <div class="flex flex-column gap-1">
                     <label>Stop</label>
-                    <InputText
-                        v-model="form.stop"
-                        placeholder="YYYY-MM-DD HH:MM"
-                        class="w-full"
-                    />
+                    <InputText v-model="form.stop" placeholder="YYYY-MM-DD HH:MM" class="w-full" />
                 </div>
                 <div class="flex flex-column gap-1">
                     <label>Comment</label>
-                    <Textarea v-model="form.comment" rows="2" class="w-full" auto-resize />
+                    <p class="muted m-0">
+                        Time is for the customer. A comment on one project keeps the whole interval on that project.
+                        Comments on several projects share the same interval.
+                    </p>
+                    <table class="comment-grid">
+                        <thead>
+                            <tr>
+                                <th>Project</th>
+                                <th>Comment</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr
+                                v-for="row in form.lines"
+                                :key="row.project_id"
+                                :class="{ picked: row.project_id === form.anchor_id }"
+                                @click="form.anchor_id = row.project_id"
+                            >
+                                <td>{{ row.name }}<span v-if="row.is_default"> (default)</span></td>
+                                <td>
+                                    <Textarea
+                                        v-model="row.comment"
+                                        class="w-full comment-line"
+                                        rows="1"
+                                        auto-resize
+                                        @focus="form.anchor_id = row.project_id"
+                                    />
+                                </td>
+                            </tr>
+                            <tr v-if="form.lines.length === 0">
+                                <td colspan="2">This customer has no projects.</td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
             <template #footer>
@@ -167,8 +180,8 @@ import Column from "primevue/column";
 import Button from "primevue/button";
 import Dialog from "primevue/dialog";
 import InputText from "primevue/inputtext";
-import Textarea from "primevue/textarea";
 import Select from "primevue/select";
+import Textarea from "primevue/textarea";
 import api, { errorMessage } from "@/api/client";
 import { formatDateTime, toLocalInput, fromLocalInput } from "@/utils/datetime";
 
@@ -183,7 +196,7 @@ const saving = ref(false);
 const dialogVisible = ref(false);
 const editing = ref(null);
 const filters = reactive({ customer_id: null, project_id: null, from: "", to: "" });
-const form = reactive({ customer_id: null, project_id: null, start: "", stop: "", comment: "" });
+const form = reactive({ customer_id: null, anchor_id: null, start: "", stop: "", lines: [] });
 
 const customerOptions = computed(() => customers.value.map((c) => ({ label: c.name, value: c.id })));
 
@@ -195,37 +208,76 @@ const filterProjectOptions = computed(() => {
     return list.map((p) => ({ label: p.name, value: p.id }));
 });
 
-const formProjectOptions = computed(() => {
-    let list = projects.value;
-    if (form.customer_id) {
-        list = list.filter((p) => p.customer_id === form.customer_id);
-    }
-    return list.map((p) => ({ label: p.name, value: p.id }));
-});
-
 function projectName(id) {
-    return projects.value.find((p) => p.id === id)?.name || id;
+    return projects.value.find((p) => p.id === id)?.name || (id ? `#${id}` : "—");
 }
 
-function projectCustomerName(projectId) {
-    const p = projects.value.find((x) => x.id === projectId);
+function reportLines(row) {
+    if (row.lines && row.lines.length) return row.lines;
+    return [{ project_id: row.project_id, comment: row.comment || "" }];
+}
+
+function reportCustomerName(row) {
+    if (row.customer_id) {
+        return customers.value.find((c) => c.id === row.customer_id)?.name || row.customer_id;
+    }
+    const p = projects.value.find((x) => x.id === row.project_id);
     if (!p) return "—";
     return customers.value.find((c) => c.id === p.customer_id)?.name || p.customer_id;
+}
+
+function reportProjectLabel(row) {
+    const lines = reportLines(row);
+    if (lines.length <= 1) return projectName(lines[0].project_id);
+    return lines.map((ln) => projectName(ln.project_id)).join(", ");
+}
+
+function reportCommentLabel(row) {
+    const lines = reportLines(row);
+    if (lines.length <= 1) return lines[0].comment || row.comment || "";
+    return lines
+        .map((ln) => {
+            const text = (ln.comment || "").trim();
+            return text ? `${projectName(ln.project_id)}\n${text}` : projectName(ln.project_id);
+        })
+        .join("\n\n");
 }
 
 function onFilterCustomerChange() {
     filters.project_id = null;
 }
 
+function projectsForCustomer(customerId, extraIds) {
+    const list = projects.value.filter(
+        (p) => p.customer_id === customerId && (p.active !== false || (extraIds && extraIds.has(p.id))),
+    );
+    list.sort((a, b) => {
+        const defaultDiff = Number(!!b.is_default) - Number(!!a.is_default);
+        if (defaultDiff) return defaultDiff;
+        return a.name.localeCompare(b.name);
+    });
+    return list;
+}
+
+function fillLines(customerId, comments, anchorId) {
+    const extra = new Set(Object.keys(comments || {}).map((id) => Number(id)));
+    const rows = projectsForCustomer(customerId, extra).map((p) => ({
+        project_id: p.id,
+        name: p.name,
+        is_default: !!p.is_default,
+        comment: comments?.[p.id] || "",
+    }));
+    form.lines = rows;
+    const preferred = rows.find((r) => r.project_id === anchorId) || rows.find((r) => r.is_default) || rows[0];
+    form.anchor_id = preferred ? preferred.project_id : null;
+}
+
 function onFormCustomerChange() {
-    form.project_id = null;
+    fillLines(form.customer_id, {}, null);
 }
 
 async function loadCatalog() {
-    const [c, p] = await Promise.all([
-        api.get("/customers", { params: { active: "true" } }),
-        api.get("/projects", { params: { active: "true" } }),
-    ]);
+    const [c, p] = await Promise.all([api.get("/customers", { params: { active: "true" } }), api.get("/projects")]);
     customers.value = c.data.data || [];
     projects.value = p.data.data || [];
 }
@@ -270,27 +322,37 @@ async function load() {
 function openCreate() {
     editing.value = null;
     form.customer_id = null;
-    form.project_id = null;
+    form.anchor_id = null;
     form.start = "";
     form.stop = "";
-    form.comment = "";
+    form.lines = [];
     dialogVisible.value = true;
 }
 
 function openEdit(row) {
     editing.value = row;
-    const p = projects.value.find((x) => x.id === row.project_id);
-    form.customer_id = p?.customer_id ?? null;
-    form.project_id = row.project_id;
+    const lines = reportLines(row);
+    const p = projects.value.find((x) => x.id === (lines[0] && lines[0].project_id));
+    form.customer_id = row.customer_id || p?.customer_id || null;
     form.start = toLocalInput(row.start);
     form.stop = toLocalInput(row.stop);
-    form.comment = row.comment || "";
+    const comments = {};
+    for (const ln of lines) {
+        if (ln.comment) comments[ln.project_id] = ln.comment;
+    }
+    const anchor = lines.length === 1 ? lines[0].project_id : row.project_id;
+    fillLines(form.customer_id, comments, anchor);
     dialogVisible.value = true;
 }
 
 async function save() {
-    if (!form.project_id || !form.start) {
-        toast.add({ severity: "warn", summary: "Validation", detail: "Project and start are required", life: 3000 });
+    if (!form.customer_id || !form.anchor_id || !form.start) {
+        toast.add({
+            severity: "warn",
+            summary: "Validation",
+            detail: "Customer, project, and start are required",
+            life: 3000,
+        });
         return;
     }
     const start = fromLocalInput(form.start);
@@ -307,10 +369,11 @@ async function save() {
     saving.value = true;
     try {
         const body = {
-            project_id: form.project_id,
+            customer_id: form.customer_id,
+            project_id: form.anchor_id,
             start,
             stop,
-            comment: form.comment,
+            lines: form.lines.map((ln) => ({ project_id: ln.project_id, comment: ln.comment || "" })),
         };
         if (editing.value) {
             await api.put(`/reports/${editing.value.id}`, body);
@@ -350,3 +413,31 @@ onMounted(async () => {
     await load();
 });
 </script>
+
+<style scoped>
+.report-comment {
+    white-space: pre-line;
+}
+.comment-grid {
+    width: 100%;
+    border-collapse: collapse;
+}
+.comment-grid th,
+.comment-grid td {
+    border: 1px solid var(--p-content-border-color, #ddd);
+    padding: 0.35rem 0.5rem;
+    text-align: left;
+    vertical-align: top;
+}
+.comment-grid th {
+    background: var(--p-content-hover-background, #f4f4f4);
+}
+.comment-grid tr.picked td:first-child {
+    font-weight: 600;
+}
+.comment-grid :deep(textarea.comment-line) {
+    min-height: 2.2rem;
+    resize: none;
+    overflow: hidden;
+}
+</style>

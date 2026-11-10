@@ -6,10 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed
+
+- A time report belongs to a customer. It can carry several project comments on the same start and stop. The timesheet counts that interval once. Hours are added to a project only when the report names that project alone. Shared intervals are listed as "Several projects" and are not split by moving time between projects.
+- The timesheet PDF lists the project first, then that project's comment. Several projects on one interval stay on one row.
+- Sync protocol is 2. `/healthz` advertises `2`.
+
 ### Added
 
-- `/healthz` advertises `protocol`, the desktop sync contract. It stays at 1 until a change would make an older client misread this server or this server reject that client.
+- `/healthz` advertises `protocol`, the desktop sync contract. It stays at 2 until a change would make an older client misread this server or this server reject that client.
 - Example Caddyfile for the reverse HTTPS proxy (`deploy/caddy-ergotime.Caddyfile`).
+- One project per customer can be marked as the default. Setting a new default clears the previous one. New time reports preselect that project when the customer is chosen.
 
 ## [1.0.0] - 2026-11-09
 

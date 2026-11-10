@@ -12,7 +12,10 @@ import (
 // older client would misread this server or this server would reject
 // that client: a removed or redefined field, a new timestamp format,
 // or a different auth scheme.
-const SyncProtocol = 1
+// Protocol 2 adds report lines (several project comments on one customer
+// interval). An older client would store only project_id and comment, then
+// push that back and drop the other lines.
+const SyncProtocol = 2
 
 // HealthHandler provides liveness/readiness probes.
 type HealthHandler struct {

@@ -5,6 +5,8 @@ Modern reimplementation of the Ergotime web API and GUI server. Release notes ar
 Tracks work time (**customers → projects → reports**), serves a Vue SPA admin UI,
 and syncs with the desktop client.
 
+![Ergotime dashboard](docs/dashboard.png)
+
 ## Stack
 
 | Layer    | Technology                                                                                               |
@@ -24,7 +26,7 @@ GitHub Actions (`.github/workflows/build.yml`) runs the tests and builds one `li
 
 - **Users** stored in PostgreSQL (bootstrap admin on first start)
 - **Customers** CRUD (top-level billing / work entity)
-- **Projects** CRUD under a customer (optional cost center, free-text unit e.g. hours/kilometers)
+- **Projects** CRUD under a customer (optional cost center, free-text unit e.g. hours/kilometers, one optional default per customer)
 - **Reports** CRUD + incremental **sync** (`/api/report/sync/:seq`) for the desktop client (scoped per user)
 - **Monthly report** aggregation for the SPA (customer → project breakdown)
 - **Timesheets**: per-customer PDF export for a selected month, project reallocation dialog, invoice status
@@ -139,7 +141,7 @@ All JSON endpoints under `/api` require authentication except:
 | ------ | ------------------ | --------------------------------------------------------------- |
 | POST   | `/api/auth/login`  | JSON `{username,password}` → sets session cookie                |
 | POST   | `/api/auth/logout` | Clears session cookie                                           |
-| GET    | `/healthz`         | Liveness. `protocol` is the desktop sync contract (currently 1) |
+| GET    | `/healthz`         | Liveness. `protocol` is the desktop sync contract (currently 2) |
 | GET    | `/readyz`          | DB readiness                                                    |
 
 Authenticated (cookie JWT, `Authorization: Bearer <jwt>`, or HTTP Basic):

@@ -29,8 +29,8 @@ func TestLiveAdvertisesSyncProtocol(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if SyncProtocol != 1 {
-		t.Fatalf("SyncProtocol = %d, want 1", SyncProtocol)
+	if SyncProtocol != 2 {
+		t.Fatalf("SyncProtocol = %d, want 2", SyncProtocol)
 	}
 	if body.Status != "ok" || body.Protocol != SyncProtocol {
 		t.Fatalf("body %+v", body)

@@ -201,7 +201,7 @@ const projectsDialogHeader = computed(() => {
 
 const fromProjectOptions = computed(() =>
     projectRows.value
-        .filter((p) => p.total_sec > 0)
+        .filter((p) => p.project_id > 0 && p.total_sec > 0)
         .map((p) => ({
             value: p.project_id,
             label: `${p.name} (${p.total_hm} ${p.unit || ""})`.trim(),
@@ -210,7 +210,7 @@ const fromProjectOptions = computed(() =>
 
 const toProjectOptions = computed(() =>
     projectRows.value
-        .filter((p) => p.project_id !== moveFromId.value)
+        .filter((p) => p.project_id > 0 && p.project_id !== moveFromId.value)
         .map((p) => ({
             value: p.project_id,
             label: `${p.name} (${p.total_hm} ${p.unit || ""})`.trim(),
