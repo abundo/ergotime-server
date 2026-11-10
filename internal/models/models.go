@@ -8,14 +8,17 @@ import (
 // Table name matches the legacy "users" table.
 // Name is the unique login username; FullName is the display / real name.
 type User struct {
-	ID           int64     `gorm:"column:_id;primaryKey;autoIncrement" json:"id"`
-	Name         string    `gorm:"column:name;type:text;uniqueIndex;not null" json:"name"`
-	FullName     string    `gorm:"column:full_name;type:text" json:"full_name"`
-	PasswordHash string    `gorm:"column:password;type:text;not null" json:"-"`
-	Active       bool      `gorm:"column:active;not null;default:true" json:"active"`
-	IsAdmin      bool      `gorm:"column:is_admin;not null;default:false" json:"is_admin"`
-	CreatedAt    time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
-	UpdatedAt    time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	ID           int64  `gorm:"column:_id;primaryKey;autoIncrement" json:"id"`
+	Name         string `gorm:"column:name;type:text;uniqueIndex;not null" json:"name"`
+	FullName     string `gorm:"column:full_name;type:text" json:"full_name"`
+	PasswordHash string `gorm:"column:password;type:text;not null" json:"-"`
+	Active       bool   `gorm:"column:active;not null;default:true" json:"active"`
+	IsAdmin      bool   `gorm:"column:is_admin;not null;default:false" json:"is_admin"`
+	// Timezone is an IANA name (for example Europe/Stockholm). Empty means the
+	// client should use the browser timezone. Stored report instants stay UTC.
+	Timezone  string    `gorm:"column:timezone;type:text;not null;default:''" json:"timezone"`
+	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 }
 
 func (User) TableName() string { return "users" }

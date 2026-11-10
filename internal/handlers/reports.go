@@ -584,7 +584,11 @@ func (h *ReportsHandler) Monthly(c echo.Context) error {
 
 	customerID, _ := strconv.ParseInt(c.QueryParam("customer_id"), 10, 64)
 	projectID, _ := strconv.ParseInt(c.QueryParam("project_id"), 10, 64)
-	monthStr, start, end, err := parseMonthParam(c.QueryParam("month"))
+	loc, err := viewerLocation(h.DB, c)
+	if err != nil {
+		return badRequest(c, err.Error())
+	}
+	monthStr, start, end, err := parseMonthParam(c.QueryParam("month"), loc)
 	if err != nil {
 		return badRequest(c, err.Error())
 	}
@@ -622,7 +626,7 @@ func (h *ReportsHandler) Monthly(c echo.Context) error {
 		return internal(c, "failed to load customers")
 	}
 
-	customers, grandTotal := buildMonthlyCustomers(reports, projectsByID, customersByID, customerID)
+	customers, grandTotal := buildMonthlyCustomers(reports, projectsByID, customersByID, customerID, loc)
 	resp := dto.MonthlyReportResponse{
 		Month:      monthStr,
 		UserID:     userID,
@@ -720,6 +724,7 @@ func buildMonthlyCustomers(
 	projectsByID map[int64]models.Project,
 	customersByID map[int64]models.Customer,
 	filterCustomerID int64,
+	loc *time.Location,
 ) ([]dto.MonthlyCustomer, time.Duration) {
 	byCust := map[int64][]models.Report{}
 	var custIDs []int64
@@ -753,7 +758,7 @@ func buildMonthlyCustomers(
 	var grand time.Duration
 	for _, cid := range custIDs {
 		reps := byCust[cid]
-		days, total := groupReportsByDay(reps, names)
+		days, total := groupReportsByDay(reps, names, loc)
 		if len(days) == 0 {
 			continue
 		}

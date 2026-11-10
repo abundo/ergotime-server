@@ -8,9 +8,9 @@ import (
 )
 
 func TestBuildMonthlyCustomers_ProjectThenComment(t *testing.T) {
-	start := time.Date(2026, 8, 3, 9, 15, 0, 0, time.Local)
+	start := time.Date(2026, 8, 3, 9, 15, 0, 0, time.UTC)
 	stop := start.Add(90 * time.Minute)
-	next := time.Date(2026, 8, 4, 8, 0, 0, 0, time.Local)
+	next := time.Date(2026, 8, 4, 8, 0, 0, 0, time.UTC)
 	nextStop := next.Add(time.Hour)
 
 	reports := []models.Report{
@@ -46,7 +46,7 @@ func TestBuildMonthlyCustomers_ProjectThenComment(t *testing.T) {
 		7: {ID: 7, Name: "Acme", Description: "Acme AB"},
 	}
 
-	got, total := buildMonthlyCustomers(reports, projects, customers, 0)
+	got, total := buildMonthlyCustomers(reports, projects, customers, 0, time.UTC)
 	if total != 150*time.Minute || len(got) != 1 {
 		t.Fatalf("customers=%d total=%v", len(got), total)
 	}
@@ -90,7 +90,7 @@ func TestBuildMonthlyCustomers_ProjectThenComment(t *testing.T) {
 }
 
 func TestBuildMonthlyCustomers_FiltersCustomer(t *testing.T) {
-	start := time.Date(2026, 8, 3, 9, 0, 0, 0, time.Local)
+	start := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
 	stop := start.Add(time.Hour)
 	reports := []models.Report{
 		{ID: 1, CustomerID: 1, ProjectID: 1, Start: start, Stop: &stop},
@@ -104,7 +104,7 @@ func TestBuildMonthlyCustomers_FiltersCustomer(t *testing.T) {
 		1: {ID: 1, Name: "One"},
 		2: {ID: 2, Name: "Two"},
 	}
-	got, total := buildMonthlyCustomers(reports, projects, customers, 2)
+	got, total := buildMonthlyCustomers(reports, projects, customers, 2, time.UTC)
 	if total != time.Hour || len(got) != 1 || got[0].CustomerID != 2 {
 		t.Fatalf("got %+v total=%v", got, total)
 	}

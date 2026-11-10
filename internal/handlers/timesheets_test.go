@@ -131,7 +131,7 @@ func TestParseHMDuration(t *testing.T) {
 }
 
 func TestGroupReportsByDay_ProjectThenOwnComment(t *testing.T) {
-	start := time.Date(2026, 8, 3, 9, 15, 0, 0, time.Local)
+	start := time.Date(2026, 8, 3, 9, 15, 0, 0, time.UTC)
 	stop := start.Add(90 * time.Minute)
 	reports := []models.Report{
 		{
@@ -146,7 +146,7 @@ func TestGroupReportsByDay_ProjectThenOwnComment(t *testing.T) {
 		},
 	}
 	names := map[int64]string{1: "Alpha", 2: "Beta"}
-	days, total := groupReportsByDay(reports, names)
+	days, total := groupReportsByDay(reports, names, time.UTC)
 	if total != 90*time.Minute || len(days) != 1 || len(days[0].Entries) != 1 {
 		t.Fatalf("days=%+v total=%v", days, total)
 	}
@@ -162,6 +162,51 @@ func TestGroupReportsByDay_ProjectThenOwnComment(t *testing.T) {
 	}
 	if days[0].Entries[0].Start != "09:15" || days[0].Entries[0].Length != "01:30" {
 		t.Fatalf("time: %+v", days[0].Entries[0])
+	}
+}
+
+func TestGroupReportsByDay_DisplayZone(t *testing.T) {
+	start := time.Date(2026, 11, 9, 23, 8, 5, 0, time.UTC)
+	stop := start.Add(6 * time.Second)
+	reports := []models.Report{{ID: 1, ProjectID: 1, Start: start, Stop: &stop}}
+	names := map[int64]string{1: "Wholesale"}
+
+	utcDays, _ := groupReportsByDay(reports, names, time.UTC)
+	if utcDays[0].Date != "2026-11-09" || utcDays[0].Entries[0].Start != "23:08" {
+		t.Fatalf("utc day: %+v", utcDays[0])
+	}
+
+	loc, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localDays, _ := groupReportsByDay(reports, names, loc)
+	if localDays[0].Date != "2026-11-10" || localDays[0].Entries[0].Start != "00:08" {
+		t.Fatalf("stockholm day: %+v", localDays[0])
+	}
+}
+
+func TestParseMonthParam_UsesViewerZone(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, start, end, err := parseMonthParam("2026-11", loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !start.Equal(time.Date(2026, 10, 31, 23, 0, 0, 0, time.UTC)) {
+		t.Fatalf("start %s", start.UTC())
+	}
+	if !end.Equal(time.Date(2026, 11, 30, 23, 0, 0, 0, time.UTC)) {
+		t.Fatalf("end %s", end.UTC())
+	}
+	_, utcStart, _, err := parseMonthParam("2026-11", time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utcStart.Equal(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("utc start %s", utcStart.UTC())
 	}
 }
 

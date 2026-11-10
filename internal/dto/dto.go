@@ -1,6 +1,8 @@
 package dto
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/abundo/ergotime-server/internal/models"
@@ -34,6 +36,8 @@ type UserPublic struct {
 	FullName string `json:"full_name"`
 	Active   bool   `json:"active"`
 	IsAdmin  bool   `json:"is_admin"`
+	// Timezone is an IANA name. Empty means "use the browser timezone".
+	Timezone string `json:"timezone"`
 }
 
 func UserFromModel(u *models.User) UserPublic {
@@ -43,16 +47,18 @@ func UserFromModel(u *models.User) UserPublic {
 		FullName: u.FullName,
 		Active:   u.Active,
 		IsAdmin:  u.IsAdmin,
+		Timezone: u.Timezone,
 	}
 }
 
 // CreateUserRequest creates a new local user.
 type CreateUserRequest struct {
-	Name     string `json:"name"`
-	FullName string `json:"full_name"`
-	Password string `json:"password"`
-	Active   *bool  `json:"active"`
-	IsAdmin  *bool  `json:"is_admin"`
+	Name     string  `json:"name"`
+	FullName string  `json:"full_name"`
+	Password string  `json:"password"`
+	Active   *bool   `json:"active"`
+	IsAdmin  *bool   `json:"is_admin"`
+	Timezone *string `json:"timezone"`
 }
 
 // UpdateUserRequest updates user fields (password optional).
@@ -62,6 +68,9 @@ type UpdateUserRequest struct {
 	Password *string `json:"password"`
 	Active   *bool   `json:"active"`
 	IsAdmin  *bool   `json:"is_admin"`
+	// Timezone is an IANA name. An empty string clears the profile and the
+	// browser timezone is used for display.
+	Timezone *string `json:"timezone"`
 }
 
 // CustomerRequest is create/update payload for customers.
@@ -84,7 +93,8 @@ type ProjectRequest struct {
 }
 
 // ReportRequest is create/update payload for reports.
-// Times are RFC3339 or "2006-01-02 15:04:05".
+// Times are UTC instants: RFC3339 (with Z or an offset) or "2006-01-02 15:04:05"
+// with no zone, which is read as UTC. Display conversion happens in the client.
 type ReportRequest struct {
 	UserID    *int64  `json:"user_id"`
 	ProjectID *int64  `json:"project_id"`
@@ -256,23 +266,31 @@ func LegacyReportFrom(r *models.Report) LegacyReport {
 	}
 }
 
-// Time layouts accepted from clients.
-var TimeLayouts = []string{
-	time.RFC3339,
-	time.RFC3339Nano,
-	"2006-01-02 15:04:05",
-	"2006-01-02T15:04:05",
-	"2006-01-02 15:04:05.999999",
-}
-
+// ParseTime reads a report instant. A value with Z or a numeric offset is that
+// absolute instant. A value with no zone is UTC, so rows from different
+// clients stay comparable. The result is always in time.UTC.
 func ParseTime(s string) (time.Time, error) {
-	var last error
-	for _, layout := range TimeLayouts {
-		t, err := time.ParseInLocation(layout, s, time.Local)
-		if err == nil {
-			return t, nil
-		}
-		last = err
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("empty time")
 	}
-	return time.Time{}, last
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t.UTC(), nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), nil
+	}
+	for _, layout := range []string{
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02T15:04:05.999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02T15:04",
+	} {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			return t.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid time %q", s)
 }

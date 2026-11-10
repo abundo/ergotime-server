@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/abundo/ergotime-server/internal/auth"
 	"github.com/abundo/ergotime-server/internal/dto"
@@ -73,12 +74,22 @@ func (h *UsersHandler) Create(c echo.Context) error {
 		isAdmin = *req.IsAdmin
 	}
 
+	timezone := ""
+	if req.Timezone != nil {
+		var err error
+		timezone, err = normalizeTimezone(*req.Timezone)
+		if err != nil {
+			return badRequest(c, err.Error())
+		}
+	}
+
 	user := models.User{
 		Name:         req.Name,
 		FullName:     strings.TrimSpace(req.FullName),
 		PasswordHash: hash,
 		Active:       active,
 		IsAdmin:      isAdmin,
+		Timezone:     timezone,
 	}
 	if err := h.DB.Create(&user).Error; err != nil {
 		if isUniqueViolation(err) {
@@ -150,6 +161,13 @@ func (h *UsersHandler) Update(c echo.Context) error {
 		}
 		user.IsAdmin = *req.IsAdmin
 	}
+	if req.Timezone != nil {
+		tz, err := normalizeTimezone(*req.Timezone)
+		if err != nil {
+			return badRequest(c, err.Error())
+		}
+		user.Timezone = tz
+	}
 
 	if err := h.DB.Save(&user).Error; err != nil {
 		if isUniqueViolation(err) {
@@ -178,6 +196,19 @@ func (h *UsersHandler) Delete(c echo.Context) error {
 		return notFound(c, "user not found")
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// normalizeTimezone accepts an IANA name or a blank value. Blank means the
+// browser timezone is used when the report is shown.
+func normalizeTimezone(raw string) (string, error) {
+	tz := strings.TrimSpace(raw)
+	if tz == "" {
+		return "", nil
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return "", errors.New("timezone must be an IANA name such as Europe/Stockholm")
+	}
+	return tz, nil
 }
 
 func isUniqueViolation(err error) bool {

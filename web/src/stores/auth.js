@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import api, { errorMessage } from "@/api/client";
+import { setDisplayTimeZone } from "@/utils/datetime";
 
 export const useAuthStore = defineStore("auth", () => {
   const user = ref(null);
@@ -15,6 +16,7 @@ export const useAuthStore = defineStore("auth", () => {
     try {
       const { data } = await api.get("/auth/me");
       user.value = data;
+      setDisplayTimeZone(data?.timezone);
       return true;
     } catch {
       user.value = null;
@@ -29,6 +31,7 @@ export const useAuthStore = defineStore("auth", () => {
     try {
       const { data } = await api.post("/auth/login", { username, password });
       user.value = data.user;
+      setDisplayTimeZone(data.user?.timezone);
       ready.value = true;
       return { ok: true };
     } catch (err) {
@@ -46,6 +49,7 @@ export const useAuthStore = defineStore("auth", () => {
       /* ignore */
     }
     user.value = null;
+    setDisplayTimeZone("");
   }
 
   return {

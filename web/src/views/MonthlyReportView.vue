@@ -133,9 +133,7 @@ import Select from "primevue/select";
 import Button from "primevue/button";
 import Tag from "primevue/tag";
 import api, { errorMessage } from "@/api/client";
-import { currentMonth } from "@/utils/datetime";
-
-const weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+import { currentMonth, weekdayName } from "@/utils/datetime";
 
 const toast = useToast();
 const loading = ref(false);
@@ -164,8 +162,8 @@ function onCustomerChange() {
 function dayHeading(date) {
     const m = String(date || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
     if (!m) return date || "";
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    return `${m[1]}-${m[2]}-${m[3]} ${weekdays[d.getDay()]}`;
+    const day = weekdayName(date);
+    return day ? `${m[1]}-${m[2]}-${m[3]} ${day}` : `${m[1]}-${m[2]}-${m[3]}`;
 }
 
 function entryNotes(entry) {

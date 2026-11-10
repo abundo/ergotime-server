@@ -93,6 +93,16 @@ func writeReport(tx *gorm.DB, item *models.Report, isNew bool) error {
 	if err := applyLines(tx, item); err != nil {
 		return err
 	}
+	// Instants are stored as UTC. timestamptz keeps the instant; the location
+	// on the Go value is what later JSON and day-bucketing start from.
+	item.Start = item.Start.UTC()
+	if item.Stop != nil {
+		stop := item.Stop.UTC()
+		item.Stop = &stop
+	}
+	if !item.Modified.IsZero() {
+		item.Modified = item.Modified.UTC()
+	}
 	if isNew {
 		if err := tx.Create(item).Error; err != nil {
 			return err

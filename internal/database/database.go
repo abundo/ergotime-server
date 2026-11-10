@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -8,6 +9,9 @@ import (
 	"github.com/abundo/ergotime-server/internal/auth"
 	"github.com/abundo/ergotime-server/internal/config"
 	"github.com/abundo/ergotime-server/internal/models"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -20,7 +24,31 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 		logLevel = logger.Info
 	}
 
-	db, err := gorm.Open(postgres.Open(cfg.Database.DSN()), &gorm.Config{
+	db, err := gorm.Open(postgres.New(postgres.Config{
+		DSN: cfg.Database.DSN(),
+		// time.Unix (the default timestamptz scan) attaches the process
+		// timezone. Keep the Go value in UTC so JSON and comparisons stay UTC.
+		OptionOpenDB: []stdlib.OptionOpenDB{
+			stdlib.OptionAfterConnect(func(ctx context.Context, conn *pgx.Conn) error {
+				// One callback only: GORM replaces AfterConnect when the DSN
+				// names a timezone, so the session zone and both codecs are set here.
+				if _, err := conn.Exec(ctx, `SET TIME ZONE 'UTC'`); err != nil {
+					return err
+				}
+				conn.TypeMap().RegisterType(&pgtype.Type{
+					Name:  "timestamp",
+					OID:   pgtype.TimestampOID,
+					Codec: &pgtype.TimestampCodec{ScanLocation: time.UTC},
+				})
+				conn.TypeMap().RegisterType(&pgtype.Type{
+					Name:  "timestamptz",
+					OID:   pgtype.TimestamptzOID,
+					Codec: &pgtype.TimestamptzCodec{ScanLocation: time.UTC},
+				})
+				return nil
+			}),
+		},
+	}), &gorm.Config{
 		Logger: logger.Default.LogMode(logLevel),
 		NowFunc: func() time.Time {
 			return time.Now().UTC()
@@ -71,6 +99,7 @@ func migrate(db *gorm.DB) error {
 		`ALTER TABLE users ALTER COLUMN name TYPE text`,
 		`ALTER TABLE users ALTER COLUMN full_name TYPE text`,
 		`ALTER TABLE users ALTER COLUMN password TYPE text`,
+		`ALTER TABLE users ALTER COLUMN timezone TYPE text`,
 		`ALTER TABLE customer ALTER COLUMN name TYPE text`,
 		`ALTER TABLE customer ALTER COLUMN description TYPE text`,
 		`ALTER TABLE project ALTER COLUMN name TYPE text`,

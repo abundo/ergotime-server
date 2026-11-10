@@ -12,6 +12,7 @@ import (
 
 	"github.com/abundo/ergotime-server/internal/database"
 	"github.com/abundo/ergotime-server/internal/dto"
+	"github.com/abundo/ergotime-server/internal/middleware"
 	"github.com/abundo/ergotime-server/internal/models"
 	"github.com/go-pdf/fpdf"
 	"github.com/labstack/echo/v4"
@@ -59,7 +60,7 @@ type timesheetProjectSummary struct {
 // List returns customers that have reported time in the given month.
 // GET /api/timesheets?month=YYYY-MM
 func (h *TimesheetsHandler) List(c echo.Context) error {
-	monthStr, start, end, err := parseMonthParam(c.QueryParam("month"))
+	monthStr, start, end, _, err := h.monthRange(c, c.QueryParam("month"))
 	if err != nil {
 		return badRequest(c, err.Error())
 	}
@@ -132,7 +133,7 @@ func (h *TimesheetsHandler) MarkInvoiced(c echo.Context) error {
 	if req.CustomerID <= 0 {
 		return badRequest(c, "customer_id is required")
 	}
-	monthStr, start, end, err := parseMonthParam(req.Month)
+	monthStr, start, end, _, err := h.monthRange(c, req.Month)
 	if err != nil {
 		return badRequest(c, err.Error())
 	}
@@ -172,7 +173,7 @@ func (h *TimesheetsHandler) MarkInvoiced(c echo.Context) error {
 // Includes active customer projects with zero time so time can be moved onto them.
 // GET /api/timesheets/projects?month=YYYY-MM&customer_id=N
 func (h *TimesheetsHandler) Projects(c echo.Context) error {
-	monthStr, start, end, err := parseMonthParam(c.QueryParam("month"))
+	monthStr, start, end, _, err := h.monthRange(c, c.QueryParam("month"))
 	if err != nil {
 		return badRequest(c, err.Error())
 	}
@@ -347,7 +348,7 @@ func (h *TimesheetsHandler) Reallocate(c echo.Context) error {
 	if len(req.Moves) == 0 {
 		return badRequest(c, "moves is required")
 	}
-	monthStr, start, end, err := parseMonthParam(req.Month)
+	monthStr, start, end, _, err := h.monthRange(c, req.Month)
 	if err != nil {
 		return badRequest(c, err.Error())
 	}
@@ -576,7 +577,7 @@ func moveTimeBetweenProjects(
 // PDF generates a timesheet PDF for one customer and month.
 // GET /api/timesheets/pdf?month=YYYY-MM&customer_id=N
 func (h *TimesheetsHandler) PDF(c echo.Context) error {
-	monthStr, start, end, err := parseMonthParam(c.QueryParam("month"))
+	monthStr, start, end, loc, err := h.monthRange(c, c.QueryParam("month"))
 	if err != nil {
 		return badRequest(c, err.Error())
 	}
@@ -646,7 +647,7 @@ func (h *TimesheetsHandler) PDF(c echo.Context) error {
 		}
 	}
 
-	days, grandTotal := groupReportsByDay(reports, names)
+	days, grandTotal := groupReportsByDay(reports, names, loc)
 	projectSummaries := summarizeReportsByProject(reports, projectsByID)
 	periodLabel := start.Format("January 2006")
 	customerLabel := strings.TrimSpace(cust.Description)
@@ -695,7 +696,10 @@ func notesForReport(r models.Report, names map[int64]string) []timesheetNote {
 	return notes
 }
 
-func groupReportsByDay(reports []models.Report, names map[int64]string) ([]timesheetDay, time.Duration) {
+func groupReportsByDay(reports []models.Report, names map[int64]string, loc *time.Location) ([]timesheetDay, time.Duration) {
+	if loc == nil {
+		loc = time.UTC
+	}
 	var days []timesheetDay
 	var cur *timesheetDay
 	var grandTotal time.Duration
@@ -708,7 +712,7 @@ func groupReportsByDay(reports []models.Report, names map[int64]string) ([]times
 		if dur < 0 {
 			continue
 		}
-		dateStr := r.Start.Local().Format("2006-01-02")
+		dateStr := r.Start.In(loc).Format("2006-01-02")
 		if cur == nil || cur.Date != dateStr {
 			if cur != nil {
 				days = append(days, *cur)
@@ -717,8 +721,8 @@ func groupReportsByDay(reports []models.Report, names map[int64]string) ([]times
 		}
 		cur.Entries = append(cur.Entries, timesheetDayEntry{
 			ID:       r.ID,
-			Start:    r.Start.Local().Format("15:04"),
-			Stop:     r.Stop.Local().Format("15:04"),
+			Start:    r.Start.In(loc).Format("15:04"),
+			Stop:     r.Stop.In(loc).Format("15:04"),
 			Length:   formatHM(dur),
 			Duration: dur,
 			Notes:    notesForReport(r, names),
@@ -1189,23 +1193,61 @@ func parseHMDuration(s string) (time.Duration, error) {
 }
 
 func formatDayHeading(dateStr string) string {
-	t, err := time.ParseInLocation("2006-01-02", dateStr, time.Local)
+	t, err := time.Parse("2006-01-02", dateStr)
 	if err != nil {
 		return dateStr
 	}
 	return t.Format("2006-01-02 Monday")
 }
 
-func parseMonthParam(monthStr string) (string, time.Time, time.Time, error) {
-	if monthStr == "" {
-		monthStr = time.Now().Format("2006-01")
+// monthRange is the UTC instant window for a calendar month in the viewer's
+// timezone. The stored instants stay UTC; only the window edges move.
+func (h *TimesheetsHandler) monthRange(c echo.Context, monthStr string) (string, time.Time, time.Time, *time.Location, error) {
+	loc, err := viewerLocation(h.DB, c)
+	if err != nil {
+		return "", time.Time{}, time.Time{}, nil, err
 	}
-	start, err := time.ParseInLocation("2006-01", monthStr, time.Local)
+	label, start, end, err := parseMonthParam(monthStr, loc)
+	return label, start, end, loc, err
+}
+
+func parseMonthParam(monthStr string, loc *time.Location) (string, time.Time, time.Time, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	if monthStr == "" {
+		monthStr = time.Now().In(loc).Format("2006-01")
+	}
+	start, err := time.ParseInLocation("2006-01", monthStr, loc)
 	if err != nil {
 		return "", time.Time{}, time.Time{}, fmt.Errorf("month must be YYYY-MM")
 	}
 	end := start.AddDate(0, 1, 0)
 	return monthStr, start, end, nil
+}
+
+// viewerLocation is the timezone used to present dates. The query parameter
+// wins (the browser sends it). Otherwise the profile timezone is used. An
+// empty profile means UTC for comparisons; the web UI sends the browser zone
+// instead of leaving that empty.
+func viewerLocation(db *gorm.DB, c echo.Context) (*time.Location, error) {
+	tz := strings.TrimSpace(c.QueryParam("timezone"))
+	if tz == "" && db != nil {
+		uid := middleware.UserIDFromContext(c)
+		if uid > 0 {
+			var profile string
+			_ = db.Model(&models.User{}).Where("_id = ?", uid).Pluck("timezone", &profile).Error
+			tz = strings.TrimSpace(profile)
+		}
+	}
+	if tz == "" {
+		return time.UTC, nil
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil, fmt.Errorf("timezone must be an IANA name such as Europe/Stockholm")
+	}
+	return loc, nil
 }
 
 func sanitizeFilename(s string) string {
