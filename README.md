@@ -28,8 +28,7 @@ GitHub Actions (`.github/workflows/build.yml`) runs the tests and builds one `li
 - **Customers** CRUD (top-level billing / work entity)
 - **Projects** CRUD under a customer (optional cost center, free-text unit e.g. hours/kilometers, one optional default per customer)
 - **Reports** CRUD + incremental **sync** (`/api/report/sync/:seq`) for the desktop client (scoped per user)
-- **Monthly report** aggregation for the SPA (customer → project breakdown)
-- **Timesheets**: per-customer PDF export for a selected month, project reallocation dialog, invoice status
+- **Monthly report** for the SPA: day list, summary of every active project, PDF export, moving time between projects, and invoice status
 - SPA served by the same process (production) or Vite dev proxy (development)
 - Security: CSP, HSTS, X-Frame-Options, nosniff, CORS allowlist, login rate limit, bcrypt, cookie flags for HTTPS proxy
 
@@ -159,7 +158,7 @@ Authenticated (cookie JWT, `Authorization: Bearer <jwt>`, or HTTP Basic):
 | GET            | `/api/timesheets?month=YYYY-MM`      | Customers with time in month                         |
 | GET            | `/api/timesheets/projects`           | Project totals for customer/month                    |
 | PUT            | `/api/timesheets/reallocate`         | Move time between projects (sum preserved)           |
-| GET            | `/api/timesheets/pdf`                | Timesheet PDF (project summary at end)               |
+| GET            | `/api/timesheets/pdf`                | Monthly PDF (summary lists every active project)     |
 | PUT            | `/api/timesheets/invoiced`           | Mark customer/month invoiced                         |
 | GET            | `/api/activity`                      | Legacy alias (desktop client)                        |
 | GET            | `/api/report/sync/:seq`              | Incremental report sync (pull)                       |

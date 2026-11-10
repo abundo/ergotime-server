@@ -626,7 +626,12 @@ func (h *ReportsHandler) Monthly(c echo.Context) error {
 		return internal(c, "failed to load customers")
 	}
 
-	customers, grandTotal := buildMonthlyCustomers(reports, projectsByID, customersByID, customerID, loc)
+	catalog, err := loadCustomerProjects(h.DB, customerIDsInReports(reports, projectsByID, customerID))
+	if err != nil {
+		return internal(c, "failed to load projects")
+	}
+
+	customers, grandTotal := buildMonthlyCustomers(reports, projectsByID, customersByID, catalog, customerID, projectID, loc)
 	resp := dto.MonthlyReportResponse{
 		Month:      monthStr,
 		UserID:     userID,
@@ -667,6 +672,36 @@ func loadReportProjects(db *gorm.DB, reports []models.Report) (map[int64]models.
 		out[p.ID] = p
 	}
 	return out, nil
+}
+
+func customerIDsInReports(reports []models.Report, projectsByID map[int64]models.Project, filterCustomerID int64) []int64 {
+	if filterCustomerID > 0 {
+		return []int64{filterCustomerID}
+	}
+	seen := map[int64]bool{}
+	var ids []int64
+	for _, r := range reports {
+		id := reportCustomerID(r, projectsByID)
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// loadCustomerProjects loads every project of the customers in a monthly report,
+// including active projects that have no time in the month.
+func loadCustomerProjects(db *gorm.DB, customerIDs []int64) ([]models.Project, error) {
+	if len(customerIDs) == 0 {
+		return nil, nil
+	}
+	var projects []models.Project
+	if err := db.Where("customer_id IN ?", customerIDs).Find(&projects).Error; err != nil {
+		return nil, err
+	}
+	return projects, nil
 }
 
 func loadReportCustomers(db *gorm.DB, reports []models.Report, projectsByID map[int64]models.Project) (map[int64]models.Customer, error) {
@@ -719,11 +754,16 @@ func reportCustomerID(r models.Report, projectsByID map[int64]models.Project) in
 // one customer, then each day, and on each interval the project followed by
 // that project's comment. Several projects stay on the one interval.
 // filterCustomerID drops other customers when the request named one.
+// catalog is every project of those customers. The summary lists each active
+// one, including projects with no time in the month.
+// filterProjectID limits that summary to one project when the request named one.
 func buildMonthlyCustomers(
 	reports []models.Report,
 	projectsByID map[int64]models.Project,
 	customersByID map[int64]models.Customer,
+	catalog []models.Project,
 	filterCustomerID int64,
+	filterProjectID int64,
 	loc *time.Location,
 ) ([]dto.MonthlyCustomer, time.Duration) {
 	byCust := map[int64][]models.Report{}
@@ -769,8 +809,9 @@ func buildMonthlyCustomers(
 			Description: cu.Description,
 			TotalHours:  total.Hours(),
 			TotalHM:     formatHM(total),
+			Invoiced:    allReportsInvoiced(reps),
 			Days:        monthlyDays(days),
-			Projects:    monthlyProjectSummaries(reps, projectsByID),
+			Projects:    monthlyProjectSummaries(reps, projectsByID, projectsForCustomer(catalog, cid, filterProjectID)),
 		}
 		if mc.Name == "" {
 			if cid > 0 {
@@ -825,8 +866,86 @@ func monthlyDays(days []timesheetDay) []dto.MonthlyDay {
 	return out
 }
 
-func monthlyProjectSummaries(reports []models.Report, projectsByID map[int64]models.Project) []dto.MonthlyProject {
+func projectsForCustomer(catalog []models.Project, customerID, filterProjectID int64) []models.Project {
+	out := make([]models.Project, 0, len(catalog))
+	for _, p := range catalog {
+		if p.CustomerID != customerID {
+			continue
+		}
+		if filterProjectID > 0 && p.ID != filterProjectID {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func allReportsInvoiced(reports []models.Report) bool {
+	if len(reports) == 0 {
+		return false
+	}
+	for _, r := range reports {
+		if !r.Invoiced {
+			return false
+		}
+	}
+	return true
+}
+
+// projectSummariesForCustomer is the summary table shared by the monthly report
+// and the timesheet PDF. Time is counted on a project only when the interval
+// names that project alone. Shared intervals are left off. Every active project
+// is listed, with zero time when it has none. An inactive project is listed
+// only when it has time.
+func projectSummariesForCustomer(reports []models.Report, projectsByID map[int64]models.Project, catalog []models.Project) []timesheetProjectSummary {
 	sums := summarizeReportsByProject(reports, projectsByID)
+	out := make([]timesheetProjectSummary, 0, len(sums)+len(catalog))
+	seen := map[int64]bool{}
+	for _, s := range sums {
+		if s.ProjectID == 0 {
+			continue
+		}
+		out = append(out, s)
+		seen[s.ProjectID] = true
+	}
+	for _, p := range catalog {
+		if !p.Active || seen[p.ID] {
+			continue
+		}
+		unit := strings.TrimSpace(p.Unit)
+		if unit == "" {
+			unit = "hours"
+		}
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			name = fmt.Sprintf("Project #%d", p.ID)
+		}
+		out = append(out, timesheetProjectSummary{
+			ProjectID: p.ID,
+			Name:      name,
+			Unit:      unit,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ni, nj := strings.ToLower(out[i].Name), strings.ToLower(out[j].Name)
+		if ni == nj {
+			return out[i].ProjectID < out[j].ProjectID
+		}
+		return ni < nj
+	})
+	return out
+}
+
+// monthlyProjectSummaries is the customer's "Summary by project".
+func monthlyProjectSummaries(reports []models.Report, projectsByID map[int64]models.Project, catalog []models.Project) []dto.MonthlyProject {
+	lookup := make(map[int64]models.Project, len(projectsByID)+len(catalog))
+	for id, p := range projectsByID {
+		lookup[id] = p
+	}
+	for _, p := range catalog {
+		lookup[p.ID] = p
+	}
+	sums := projectSummariesForCustomer(reports, projectsByID, catalog)
 	out := make([]dto.MonthlyProject, 0, len(sums))
 	for _, s := range sums {
 		row := dto.MonthlyProject{
@@ -836,7 +955,7 @@ func monthlyProjectSummaries(reports []models.Report, projectsByID map[int64]mod
 			TotalHours: s.Duration.Hours(),
 			TotalHM:    formatHM(s.Duration),
 		}
-		if p, ok := projectsByID[s.ProjectID]; ok {
+		if p, ok := lookup[s.ProjectID]; ok {
 			row.CostCenter = p.CostCenter
 		}
 		out = append(out, row)

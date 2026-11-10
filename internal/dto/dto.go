@@ -121,12 +121,14 @@ type MonthlyCustomer struct {
 	Description string           `json:"description"`
 	TotalHours  float64          `json:"total_hours"`
 	TotalHM     string           `json:"total_hm"`
+	Invoiced    bool             `json:"invoiced"`
 	Days        []MonthlyDay     `json:"days"`
 	Projects    []MonthlyProject `json:"projects"`
 }
 
-// MonthlyProject is one row in the customer summary. Shared intervals are
-// "Several projects" and are not added to a single project.
+// MonthlyProject is one row in the customer summary. Time is included only
+// when the interval names this project alone. Active projects with no such
+// time are still listed, at 00:00.
 type MonthlyProject struct {
 	ProjectID  int64   `json:"project_id"`
 	Name       string  `json:"name"`

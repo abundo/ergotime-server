@@ -210,6 +210,43 @@ func TestParseMonthParam_UsesViewerZone(t *testing.T) {
 	}
 }
 
+func TestProjectSummariesForCustomer_IncludesActiveWithoutTime(t *testing.T) {
+	start := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	stop := start.Add(90 * time.Minute)
+	reports := []models.Report{{
+		ProjectID: 1,
+		Start:     start,
+		Stop:      &stop,
+		Lines: []models.ReportLine{
+			{ProjectID: 1, Comment: "a"},
+			{ProjectID: 2, Comment: "b"},
+		},
+	}}
+	projects := map[int64]models.Project{
+		1: {ID: 1, CustomerID: 7, Name: "Alpha", Unit: "hours", Active: true},
+		2: {ID: 2, CustomerID: 7, Name: "Beta", Unit: "hours", Active: true},
+	}
+	catalog := []models.Project{
+		projects[1],
+		projects[2],
+		{ID: 3, CustomerID: 7, Name: "Gamma", Unit: "hours", Active: true},
+		{ID: 4, CustomerID: 7, Name: "Old", Active: false},
+	}
+	got := projectSummariesForCustomer(reports, projects, catalog)
+	if len(got) != 3 {
+		t.Fatalf("got %+v", got)
+	}
+	if got[0].Name != "Alpha" || got[0].Duration != 0 {
+		t.Fatalf("alpha: %+v", got[0])
+	}
+	if got[1].Name != "Beta" || got[1].Duration != 0 {
+		t.Fatalf("beta: %+v", got[1])
+	}
+	if got[2].Name != "Gamma" || got[2].Duration != 0 {
+		t.Fatalf("gamma: %+v", got[2])
+	}
+}
+
 func TestGenerateTimesheetPDF_ProjectColumn(t *testing.T) {
 	days := []timesheetDay{{
 		Date: "2026-08-03",
@@ -224,14 +261,15 @@ func TestGenerateTimesheetPDF_ProjectColumn(t *testing.T) {
 		}},
 		Total: 90 * time.Minute,
 	}}
-	pdfBytes, err := generateTimesheetPDF("Acme", "", "August 2026", days, 90*time.Minute, []timesheetProjectSummary{{
-		Name: "Several projects", Unit: "hours", Duration: 90 * time.Minute, Entries: 1,
-	}})
+	pdfBytes, err := generateTimesheetPDF("Acme", "", "August 2026", days, 90*time.Minute, []timesheetProjectSummary{
+		{Name: "Alpha", Unit: "hours", Duration: time.Hour},
+		{Name: "Gamma", Unit: "hours", Duration: 0},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	plain := pdfStreams(t, pdfBytes)
-	for _, s := range []string{"Project", "Comment", "Alpha", "fixed the valve", "Beta", "called the site", "09:15", "01:30"} {
+	for _, s := range []string{"Project", "Comment", "Alpha", "fixed the valve", "Beta", "called the site", "09:15", "01:30", "Gamma", "00:00"} {
 		if !bytes.Contains(plain, []byte(s)) {
 			t.Errorf("pdf missing %q", s)
 		}

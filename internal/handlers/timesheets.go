@@ -633,6 +633,14 @@ func (h *TimesheetsHandler) PDF(c echo.Context) error {
 		}
 	}
 
+	var catalog []models.Project
+	if err := h.DB.Where("customer_id = ?", customerID).Find(&catalog).Error; err != nil {
+		return internal(c, "failed to load projects")
+	}
+	for _, p := range catalog {
+		projectsByID[p.ID] = p
+	}
+
 	names := map[int64]string{}
 	for id, p := range projectsByID {
 		names[id] = p.Name
@@ -648,7 +656,7 @@ func (h *TimesheetsHandler) PDF(c echo.Context) error {
 	}
 
 	days, grandTotal := groupReportsByDay(reports, names, loc)
-	projectSummaries := summarizeReportsByProject(reports, projectsByID)
+	projectSummaries := projectSummariesForCustomer(reports, projectsByID, catalog)
 	periodLabel := start.Format("January 2006")
 	customerLabel := strings.TrimSpace(cust.Description)
 	if customerLabel == "" {

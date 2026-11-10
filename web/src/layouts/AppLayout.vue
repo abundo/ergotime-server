@@ -7,7 +7,6 @@
                 <RouterLink :to="{ name: 'customers' }">Customers</RouterLink>
                 <RouterLink :to="{ name: 'reports' }">Reports</RouterLink>
                 <RouterLink :to="{ name: 'monthly' }">Monthly</RouterLink>
-                <RouterLink :to="{ name: 'timesheets' }">Timesheets</RouterLink>
                 <RouterLink v-if="auth.isAdmin" :to="{ name: 'users' }">Users</RouterLink>
             </nav>
             <div class="user-area">

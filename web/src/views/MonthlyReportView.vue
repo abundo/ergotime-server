@@ -54,12 +54,35 @@
         </div>
 
         <div v-for="cust in report?.customers || []" :key="cust.customer_id" class="card-panel mb-3">
-            <div class="flex justify-content-between align-items-center mb-3">
+            <div class="flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
                 <div>
                     <strong>{{ cust.name }}</strong>
                     <span v-if="cust.description" class="muted"> — {{ cust.description }}</span>
+                    <Tag
+                        class="ml-2"
+                        :severity="cust.invoiced ? 'success' : 'secondary'"
+                        :value="cust.invoiced ? 'Invoiced' : 'Not invoiced'"
+                    />
                 </div>
-                <Tag :value="cust.total_hm" severity="info" />
+                <div class="flex flex-wrap gap-2 align-items-center">
+                    <Tag :value="cust.total_hm" severity="info" />
+                    <Button
+                        label="Generate PDF"
+                        icon="pi pi-file-pdf"
+                        size="small"
+                        severity="info"
+                        :loading="pdfLoadingId === cust.customer_id"
+                        @click="generatePdf(cust)"
+                    />
+                    <Button
+                        :label="cust.invoiced ? 'Unmark invoiced' : 'Mark as invoiced'"
+                        :icon="cust.invoiced ? 'pi pi-times' : 'pi pi-check'"
+                        size="small"
+                        :severity="cust.invoiced ? 'secondary' : 'success'"
+                        :loading="invoiceLoadingId === cust.customer_id"
+                        @click="toggleInvoiced(cust)"
+                    />
+                </div>
             </div>
 
             <div v-for="day in cust.days" :key="day.date" class="day-block">
@@ -121,6 +144,65 @@
                     </tr>
                 </tbody>
             </table>
+
+            <div class="move-panel">
+                <p class="muted" style="margin-top: 0">
+                    Move time between projects without changing the month total (<strong>{{ cust.total_hm }}</strong
+                    >).
+                </p>
+                <div class="flex flex-wrap gap-3 align-items-end">
+                    <div class="flex flex-column gap-1" style="min-width: 10rem; flex: 1">
+                        <label :for="'move-from-' + cust.customer_id">From project</label>
+                        <Select
+                            :input-id="'move-from-' + cust.customer_id"
+                            v-model="moveState(cust).from"
+                            :options="fromProjectOptions(cust)"
+                            option-label="label"
+                            option-value="value"
+                            placeholder="Select source"
+                            class="w-full"
+                            :disabled="moveDisabled(cust)"
+                        />
+                    </div>
+                    <div class="flex flex-column gap-1" style="min-width: 10rem; flex: 1">
+                        <label :for="'move-to-' + cust.customer_id">To project</label>
+                        <Select
+                            :input-id="'move-to-' + cust.customer_id"
+                            v-model="moveState(cust).to"
+                            :options="toProjectOptions(cust)"
+                            option-label="label"
+                            option-value="value"
+                            placeholder="Select target"
+                            class="w-full"
+                            :disabled="moveDisabled(cust)"
+                        />
+                    </div>
+                    <div class="flex flex-column gap-1" style="width: 7rem">
+                        <label :for="'move-hm-' + cust.customer_id">Amount (HH:MM)</label>
+                        <InputText
+                            :id="'move-hm-' + cust.customer_id"
+                            v-model="moveState(cust).hm"
+                            placeholder="1:30"
+                            class="w-full"
+                            :disabled="moveDisabled(cust)"
+                            @keyup.enter="applyMove(cust)"
+                        />
+                    </div>
+                    <Button
+                        label="Move"
+                        icon="pi pi-arrows-h"
+                        :loading="moveLoadingId === cust.customer_id"
+                        :disabled="moveDisabled(cust)"
+                        @click="applyMove(cust)"
+                    />
+                </div>
+                <p v-if="cust.invoiced" class="muted mt-2 mb-0" style="font-size: 0.85rem">
+                    This month is marked invoiced — unmark it before moving time.
+                </p>
+                <p v-else-if="projectId" class="muted mt-2 mb-0" style="font-size: 0.85rem">
+                    Clear the project filter to move time.
+                </p>
+            </div>
         </div>
     </div>
 </template>
@@ -143,6 +225,10 @@ const projects = ref([]);
 const customerId = ref(null);
 const projectId = ref(null);
 const month = ref(currentMonth());
+const pdfLoadingId = ref(null);
+const invoiceLoadingId = ref(null);
+const moveLoadingId = ref(null);
+const moveByCustomer = ref({});
 
 const customerOptions = computed(() => customers.value.map((c) => ({ label: c.name, value: c.id })));
 
@@ -169,6 +255,159 @@ function dayHeading(date) {
 function entryNotes(entry) {
     if (entry?.notes?.length) return entry.notes;
     return [{ project: "", comment: "" }];
+}
+
+function moveState(cust) {
+    const id = cust.customer_id;
+    if (!moveByCustomer.value[id]) {
+        moveByCustomer.value[id] = { from: null, to: null, hm: "" };
+    }
+    return moveByCustomer.value[id];
+}
+
+function moveDisabled(cust) {
+    return cust.invoiced || !!projectId.value;
+}
+
+function projectOptionLabel(proj) {
+    return `${proj.name} (${proj.total_hm} ${proj.unit || ""})`.trim();
+}
+
+function fromProjectOptions(cust) {
+    return (cust.projects || [])
+        .filter((p) => p.project_id > 0 && p.total_hm !== "00:00")
+        .map((p) => ({ value: p.project_id, label: projectOptionLabel(p) }));
+}
+
+function toProjectOptions(cust) {
+    const from = moveState(cust).from;
+    return (cust.projects || [])
+        .filter((p) => p.project_id > 0 && p.project_id !== from)
+        .map((p) => ({ value: p.project_id, label: projectOptionLabel(p) }));
+}
+
+async function generatePdf(cust) {
+    if (cust.invoiced) {
+        toast.add({
+            severity: "warn",
+            summary: "Already invoiced",
+            detail: "This month is already marked as invoiced. Generating PDF anyway.",
+            life: 5000,
+        });
+    }
+    pdfLoadingId.value = cust.customer_id;
+    try {
+        const res = await api.get("/timesheets/pdf", {
+            params: { month: month.value, customer_id: cust.customer_id },
+            responseType: "blob",
+        });
+        const blob = new Blob([res.data], { type: "application/pdf" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const safe = (cust.name || "customer").replace(/[^\w\-]+/g, "-").toLowerCase();
+        a.href = url;
+        a.download = `timesheet-${safe}-${month.value}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast.add({ severity: "success", summary: "PDF generated", life: 2000 });
+    } catch (err) {
+        let detail = errorMessage(err);
+        if (err?.response?.data instanceof Blob) {
+            try {
+                const text = await err.response.data.text();
+                const parsed = JSON.parse(text);
+                if (parsed.message) detail = parsed.message;
+            } catch {
+                /* keep default */
+            }
+        }
+        toast.add({ severity: "error", summary: "Error", detail, life: 4000 });
+    } finally {
+        pdfLoadingId.value = null;
+    }
+}
+
+async function toggleInvoiced(cust) {
+    invoiceLoadingId.value = cust.customer_id;
+    const next = !cust.invoiced;
+    try {
+        await api.put("/timesheets/invoiced", {
+            customer_id: cust.customer_id,
+            month: month.value,
+            invoiced: next,
+        });
+        cust.invoiced = next;
+        toast.add({
+            severity: "success",
+            summary: next ? "Marked as invoiced" : "Invoice mark cleared",
+            life: 2000,
+        });
+    } catch (err) {
+        toast.add({ severity: "error", summary: "Error", detail: errorMessage(err), life: 4000 });
+    } finally {
+        invoiceLoadingId.value = null;
+    }
+}
+
+async function applyMove(cust) {
+    const state = moveState(cust);
+    if (moveDisabled(cust)) return;
+    if (!state.from || !state.to) {
+        toast.add({
+            severity: "warn",
+            summary: "Validation",
+            detail: "Select both from and to projects",
+            life: 3000,
+        });
+        return;
+    }
+    if (state.from === state.to) {
+        toast.add({
+            severity: "warn",
+            summary: "Validation",
+            detail: "From and to must be different projects",
+            life: 3000,
+        });
+        return;
+    }
+    const hm = (state.hm || "").trim();
+    if (!hm) {
+        toast.add({
+            severity: "warn",
+            summary: "Validation",
+            detail: "Enter amount as HH:MM",
+            life: 3000,
+        });
+        return;
+    }
+
+    const prevTotal = cust.total_hm;
+    moveLoadingId.value = cust.customer_id;
+    try {
+        const { data } = await api.put("/timesheets/reallocate", {
+            customer_id: cust.customer_id,
+            month: month.value,
+            moves: [{ from_project_id: state.from, to_project_id: state.to, hm }],
+        });
+        if (prevTotal && data.total_hm && data.total_hm !== prevTotal) {
+            toast.add({
+                severity: "error",
+                summary: "Sum mismatch",
+                detail: `Total changed from ${prevTotal} to ${data.total_hm} — please refresh and check`,
+                life: 6000,
+            });
+        } else {
+            toast.add({ severity: "success", summary: "Time moved", life: 2000 });
+        }
+        state.hm = "";
+        await load();
+    } catch (err) {
+        toast.add({ severity: "error", summary: "Error", detail: errorMessage(err), life: 4000 });
+    } finally {
+        moveLoadingId.value = null;
+    }
 }
 
 async function load() {
@@ -268,5 +507,11 @@ onMounted(async () => {
 .sheet.summary tr.grand td {
     font-weight: 700;
     background: #dcebfa;
+}
+.move-panel {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background: #f8f9fa;
+    border: 1px solid #e0e0e0;
 }
 </style>

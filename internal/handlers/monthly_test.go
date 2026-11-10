@@ -39,14 +39,20 @@ func TestBuildMonthlyCustomers_ProjectThenComment(t *testing.T) {
 		},
 	}
 	projects := map[int64]models.Project{
-		1: {ID: 1, CustomerID: 7, Name: "Alpha", CostCenter: "CC1", Unit: "hours"},
-		2: {ID: 2, CustomerID: 7, Name: "Beta", Unit: "hours"},
+		1: {ID: 1, CustomerID: 7, Name: "Alpha", CostCenter: "CC1", Unit: "hours", Active: true},
+		2: {ID: 2, CustomerID: 7, Name: "Beta", Unit: "hours", Active: true},
 	}
 	customers := map[int64]models.Customer{
 		7: {ID: 7, Name: "Acme", Description: "Acme AB"},
 	}
+	catalog := []models.Project{
+		projects[1],
+		projects[2],
+		{ID: 3, CustomerID: 7, Name: "Gamma", CostCenter: "CC3", Unit: "hours", Active: true},
+		{ID: 4, CustomerID: 7, Name: "Old", Unit: "hours", Active: false},
+	}
 
-	got, total := buildMonthlyCustomers(reports, projects, customers, 0, time.UTC)
+	got, total := buildMonthlyCustomers(reports, projects, customers, catalog, 0, 0, time.UTC)
 	if total != 150*time.Minute || len(got) != 1 {
 		t.Fatalf("customers=%d total=%v", len(got), total)
 	}
@@ -78,14 +84,20 @@ func TestBuildMonthlyCustomers_ProjectThenComment(t *testing.T) {
 		t.Fatalf("solo: %+v", solo)
 	}
 
-	if len(cu.Projects) != 2 {
+	if len(cu.Projects) != 3 {
 		t.Fatalf("summary: %+v", cu.Projects)
 	}
 	if cu.Projects[0].Name != "Alpha" || cu.Projects[0].TotalHM != "01:00" || cu.Projects[0].CostCenter != "CC1" {
 		t.Fatalf("alpha summary: %+v", cu.Projects[0])
 	}
-	if cu.Projects[1].Name != "Several projects" || cu.Projects[1].TotalHM != "01:30" {
-		t.Fatalf("shared summary: %+v", cu.Projects[1])
+	if cu.Projects[1].Name != "Beta" || cu.Projects[1].ProjectID != 2 || cu.Projects[1].TotalHM != "00:00" {
+		t.Fatalf("beta summary: %+v", cu.Projects[1])
+	}
+	if cu.Projects[2].Name != "Gamma" || cu.Projects[2].ProjectID != 3 || cu.Projects[2].TotalHM != "00:00" || cu.Projects[2].CostCenter != "CC3" {
+		t.Fatalf("gamma summary: %+v", cu.Projects[2])
+	}
+	if cu.Invoiced {
+		t.Fatal("expected not invoiced")
 	}
 }
 
@@ -104,7 +116,7 @@ func TestBuildMonthlyCustomers_FiltersCustomer(t *testing.T) {
 		1: {ID: 1, Name: "One"},
 		2: {ID: 2, Name: "Two"},
 	}
-	got, total := buildMonthlyCustomers(reports, projects, customers, 2, time.UTC)
+	got, total := buildMonthlyCustomers(reports, projects, customers, nil, 2, 0, time.UTC)
 	if total != time.Hour || len(got) != 1 || got[0].CustomerID != 2 {
 		t.Fatalf("got %+v total=%v", got, total)
 	}

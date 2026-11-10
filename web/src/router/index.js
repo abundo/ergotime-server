@@ -35,8 +35,7 @@ const routes = [
       },
       {
         path: "timesheets",
-        name: "timesheets",
-        component: () => import("@/views/TimesheetsView.vue"),
+        redirect: { name: "monthly" },
       },
       {
         path: "users",
