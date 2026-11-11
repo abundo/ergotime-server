@@ -14,6 +14,8 @@
                 striped-rows
                 size="small"
                 data-key="id"
+                sort-field="name"
+                :sort-order="1"
                 empty-message="No customers found"
             >
                 <Column field="id" header="ID" style="width: 5rem" />
@@ -90,14 +92,17 @@
             </div>
 
             <DataTable
+                v-if="projectsDialogVisible"
                 :value="projectItems"
                 :loading="projectsLoading"
                 size="small"
                 striped-rows
                 data-key="id"
+                :sort-field="projectSortKey"
+                :sort-order="1"
                 empty-message="No projects for this customer"
             >
-                <Column field="name" header="Name" sortable />
+                <Column field="name" header="Name" sortable :sort-field="projectSortKey" />
                 <Column field="cost_center" header="Cost center" />
                 <Column field="unit" header="Unit" style="width: 8rem" />
                 <Column header="Active" style="width: 5rem">
@@ -238,13 +243,18 @@ const projectForm = reactive({
     is_default: false,
 });
 
+function compareName(a, b) {
+    return String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
+}
+
+// PrimeVue sorts by this key: active projects, then name, then inactive projects, then name.
+function projectSortKey(row) {
+    const rank = row && row.active ? "0" : "1";
+    return rank + String(row && row.name ? row.name : "").toLocaleLowerCase();
+}
+
 function sortCustomers(list) {
-    return [...list].sort((a, b) => {
-        // Active first, then name (case-insensitive)
-        const activeDiff = Number(!!b.active) - Number(!!a.active);
-        if (activeDiff !== 0) return activeDiff;
-        return String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
-    });
+    return [...list].sort(compareName);
 }
 
 async function load() {
@@ -349,9 +359,9 @@ async function loadProjects() {
 
 function sortProjects(list) {
     return [...list].sort((a, b) => {
-        const defaultDiff = Number(!!b.is_default) - Number(!!a.is_default);
-        if (defaultDiff !== 0) return defaultDiff;
-        return String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
+        const activeDiff = Number(!!b.active) - Number(!!a.active);
+        if (activeDiff !== 0) return activeDiff;
+        return compareName(a, b);
     });
 }
 

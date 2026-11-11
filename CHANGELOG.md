@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
+- The Customers page opens sorted by name. A customer's projects open with active projects first, then inactive projects, each group sorted by name.
 - Report instants are stored and compared in UTC. A time with no zone is read as UTC. A month in the monthly report and the timesheet is the calendar month in the viewer's timezone: the browser sends that zone, or the server uses the timezone saved on the user. An empty profile timezone follows the browser. Clocks on screen are converted only for display.
 - A time report belongs to a customer. It can carry several project comments on the same start and stop. The timesheet counts that interval once. Hours are added to a project only when the report names that project alone. Shared intervals are listed as "Several projects" and are not split by moving time between projects.
 - The timesheet PDF lists the project first, then that project's comment. Several projects on one interval stay on one row.
