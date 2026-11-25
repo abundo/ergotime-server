@@ -22,3 +22,7 @@ web/dist/
 
 # Go
 coverage.out
+
+# Python
+__pycache__/
+*.pyc

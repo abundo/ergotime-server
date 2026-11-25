@@ -101,6 +101,8 @@ make release
 ./bin/ergotime-server --config config/config.yaml start
 ```
 
+The process handles requests only when `start` is present. `./install.py --server user@host` builds this binary, copies it to `/opt/ergotime2/bin/ergotime-server`, and restarts the systemd service. The config on that host stays `/etc/ergotime/config.yaml`.
+
 Or: `make all` then `make run`.
 
 For local frontend iteration without recompiling Go, set `static.dir: web/dist`
@@ -182,8 +184,7 @@ Legacy activity/report JSON for the Python desktop client includes `_id`, `activ
 ## Relation to legacy `ergotime/server`
 
 This project replaces the Flask + server-rendered UI with a Go API and Vue SPA.
-Domain concepts (users, activity, project, report + `seq` sync) match the original schema intent.
-Table names stay `users`, `activity`, `project`, `report` with primary key column `_id` for easier migration from an existing database.
+Reports still sync by `seq`. Current tables are `users`, `customer`, `project`, `report`, `report_line`, and `day_share`. The primary key column is `_id`. The old `activity` table is not used. `/api/activity` remains a legacy route.
 
 If you migrate an old database, re-hash plaintext passwords (legacy stored plaintext) before production use.
 

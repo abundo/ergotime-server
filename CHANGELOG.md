@@ -6,9 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-25
+
 ### Changed
 
 - Sync protocol is 3. `/healthz` advertises `3`. Creating or updating a report requires a start and stop on a minute boundary (seconds 0) and a length of at least one minute. A report that starts at 12:20 ends at 12:21:00. An open report may omit stop. Reports already stored are left as they are until the next edit. The report form drops seconds and refuses a length under one minute.
+- The server handles requests only after the `start` subcommand. The command is `ergotime-server --config <file> start`. `--config`, `-c`, and the older `-config` still name the file. Without `start` the process prints usage and exits.
 - The Customers page opens sorted by name. A customer's projects open with active projects first, then inactive projects, each group sorted by name.
 - Report instants are stored and compared in UTC. A time with no zone is read as UTC. A month in the monthly report and the timesheet is the calendar month in the viewer's timezone: the browser sends that zone, or the server uses the timezone saved on the user. An empty profile timezone follows the browser. Clocks on screen are converted only for display.
 - A time report belongs to a customer. It can carry several project comments on the same start and stop. The timesheet counts that interval once. Until time is moved, the whole interval is billed on the report's project.
@@ -23,6 +26,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - `/healthz` advertises `protocol`, the desktop sync contract. It is 3. Bump it when an older client would misread this server or this server would reject that client.
 - Example Caddyfile for the reverse HTTPS proxy (`deploy/caddy-ergotime.Caddyfile`).
 - One project per customer can be marked as the default. Setting a new default clears the previous one. New time reports preselect that project when the customer is chosen.
+- `install.py --server user@host` builds the linux/amd64 binary, copies it to `/opt/ergotime2/bin/ergotime-server`, and restarts the systemd service. The config stays at `/etc/ergotime/config.yaml`.
 
 ## [1.0.0] - 2026-11-09
 
