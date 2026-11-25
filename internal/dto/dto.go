@@ -143,13 +143,20 @@ type MonthlyDay struct {
 	TotalHours float64        `json:"total_hours"`
 	TotalHM    string         `json:"total_hm"`
 	Entries    []MonthlyEntry `json:"entries"`
+	// Projects is this day's billing split. Lengths add up to the day's worked time.
+	Projects []MonthlyProject `json:"projects"`
 }
 
-// MonthlyNote is one project and the comment written for that project.
-// Several notes share one worked interval.
+// MonthlyNote is one project and the comment written for that project on this
+// report. Every report on a day lists every project named anywhere that day.
+// A project this report did not mention has an empty comment and no length.
+// LengthHM is that project's share of the whole day, set on the first report
+// that names the project and empty after that.
 type MonthlyNote struct {
-	Project string `json:"project"`
-	Comment string `json:"comment"`
+	ProjectID int64  `json:"project_id"`
+	Project   string `json:"project"`
+	Comment   string `json:"comment"`
+	LengthHM  string `json:"length_hm,omitempty"`
 }
 
 type MonthlyEntry struct {
@@ -208,11 +215,14 @@ type TimesheetProjectsResponse struct {
 	Projects   []TimesheetProjectRow `json:"projects"`
 }
 
-// TimesheetReallocateRequest moves reported time between projects for one customer/month.
-// Sum of time is preserved: each move takes duration from FromProjectID and gives it to ToProjectID.
+// TimesheetReallocateRequest moves reported time between projects for one day
+// of a customer month. Sum of time is preserved: each move takes duration from
+// FromProjectID and gives it to ToProjectID. Only reports that start on Date
+// are changed.
 type TimesheetReallocateRequest struct {
 	CustomerID int64                     `json:"customer_id"`
 	Month      string                    `json:"month"` // YYYY-MM
+	Date       string                    `json:"date"`  // YYYY-MM-DD, inside Month
 	Moves      []TimesheetReallocateMove `json:"moves"`
 }
 

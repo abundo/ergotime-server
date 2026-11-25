@@ -90,6 +90,7 @@ func migrate(db *gorm.DB) error {
 		&models.Project{},
 		&models.Report{},
 		&models.ReportLine{},
+		&models.DayShare{},
 	); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}

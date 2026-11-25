@@ -97,6 +97,21 @@ func (ReportLine) TableName() string { return "report_line" }
 
 func (Report) TableName() string { return "report" }
 
+// DayShare is how much of one calendar day is billed to a project.
+// The day's reports keep their start, stop, and comments. Rows exist only
+// after time has been moved. With no rows, each report is billed on its own
+// project. Day is YYYY-MM-DD in the timezone used to show the report.
+type DayShare struct {
+	ID         int64  `gorm:"column:_id;primaryKey;autoIncrement" json:"id"`
+	UserID     int64  `gorm:"column:user_id;not null;uniqueIndex:idx_day_share" json:"user_id"`
+	CustomerID int64  `gorm:"column:customer_id;not null;uniqueIndex:idx_day_share" json:"customer_id"`
+	Day        string `gorm:"column:day;type:text;not null;uniqueIndex:idx_day_share" json:"day"`
+	ProjectID  int64  `gorm:"column:project_id;not null;uniqueIndex:idx_day_share" json:"project_id"`
+	Seconds    int64  `gorm:"column:seconds;not null" json:"seconds"`
+}
+
+func (DayShare) TableName() string { return "day_share" }
+
 // DurationSeconds returns the report length in seconds (0 if still open).
 func (r *Report) DurationSeconds() int64 {
 	if r.Stop == nil {

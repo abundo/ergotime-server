@@ -85,30 +85,37 @@
                 </div>
             </div>
 
+            <p v-if="cust.invoiced" class="muted mt-0 mb-3" style="font-size: 0.85rem">
+                This month is marked invoiced — unmark it before moving time.
+            </p>
+            <p v-else-if="projectId" class="muted mt-0 mb-3" style="font-size: 0.85rem">
+                Clear the project filter to move time.
+            </p>
+
             <div v-for="day in cust.days" :key="day.date" class="day-block">
                 <div class="day-heading">{{ dayHeading(day.date) }}</div>
                 <table class="sheet">
                     <thead>
                         <tr>
-                            <th class="col-project">Project</th>
-                            <th class="col-comment">Comment</th>
                             <th class="col-time">Start</th>
                             <th class="col-time">Stop</th>
+                            <th class="col-project">Project</th>
+                            <th class="col-comment">Comment</th>
                             <th class="col-time">Length</th>
                         </tr>
                     </thead>
                     <tbody>
                         <template v-for="(entry, ei) in day.entries" :key="entry.id || ei">
                             <tr v-for="(note, ni) in entryNotes(entry)" :key="ni" :class="{ stripe: ei % 2 === 1 }">
-                                <td class="project" :class="{ sep: ni > 0 }">{{ note.project }}</td>
-                                <td class="comment" :class="{ sep: ni > 0 }">{{ note.comment }}</td>
                                 <td v-if="ni === 0" class="num" :rowspan="entryNotes(entry).length">
                                     {{ entry.start }}
                                 </td>
                                 <td v-if="ni === 0" class="num" :rowspan="entryNotes(entry).length">
                                     {{ entry.stop }}
                                 </td>
-                                <td v-if="ni === 0" class="num" :rowspan="entryNotes(entry).length">{{ entry.hm }}</td>
+                                <td class="project" :class="{ sep: ni > 0 }">{{ note.project }}</td>
+                                <td class="comment" :class="{ sep: ni > 0 }">{{ note.comment }}</td>
+                                <td class="num" :class="{ sep: ni > 0 }">{{ note.length_hm }}</td>
                             </tr>
                         </template>
                         <tr class="day-total">
@@ -117,6 +124,64 @@
                         </tr>
                     </tbody>
                 </table>
+
+                <div v-if="canMove(day) || projectId" class="move-panel">
+                    <p class="muted" style="margin-top: 0">
+                        Move time between the projects on this day. The total that can be moved is
+                        <strong>{{ day.total_hm }}</strong
+                        >. Only the length changes.
+                    </p>
+                    <div class="flex flex-wrap gap-3 align-items-end">
+                        <div class="flex flex-column gap-1" style="min-width: 10rem; flex: 1">
+                            <label :for="'move-from-' + cust.customer_id + '-' + day.date">From project</label>
+                            <Select
+                                :input-id="'move-from-' + cust.customer_id + '-' + day.date"
+                                v-model="moveState(cust, day).from"
+                                :options="fromProjectOptions(day)"
+                                option-label="label"
+                                option-value="value"
+                                placeholder="Select source"
+                                class="w-full"
+                                :disabled="moveDisabled(cust, day)"
+                                @update:model-value="onMoveFromChange(cust, day, $event)"
+                            />
+                        </div>
+                        <div class="flex flex-column gap-1" style="min-width: 10rem; flex: 1">
+                            <label :for="'move-to-' + cust.customer_id + '-' + day.date">To project</label>
+                            <Select
+                                :input-id="'move-to-' + cust.customer_id + '-' + day.date"
+                                v-model="moveState(cust, day).to"
+                                :options="toProjectOptions(cust, day)"
+                                option-label="label"
+                                option-value="value"
+                                placeholder="Select target"
+                                class="w-full"
+                                :disabled="moveDisabled(cust, day)"
+                            />
+                        </div>
+                        <div class="flex flex-column gap-1" style="width: 7rem">
+                            <label :for="'move-hm-' + cust.customer_id + '-' + day.date">Amount (HH:MM)</label>
+                            <InputText
+                                :id="'move-hm-' + cust.customer_id + '-' + day.date"
+                                v-model="moveState(cust, day).hm"
+                                placeholder="1:30"
+                                class="w-full"
+                                :disabled="moveDisabled(cust, day)"
+                                @keyup.enter="applyMove(cust, day)"
+                            />
+                        </div>
+                        <Button
+                            label="Move"
+                            icon="pi pi-arrows-h"
+                            :loading="moveLoadingKey === moveKey(cust, day)"
+                            :disabled="
+                                moveDisabled(cust, day) ||
+                                sameProject(moveState(cust, day).from, moveState(cust, day).to)
+                            "
+                            @click="applyMove(cust, day)"
+                        />
+                    </div>
+                </div>
             </div>
 
             <h2 class="summary-title">Summary by project</h2>
@@ -144,65 +209,6 @@
                     </tr>
                 </tbody>
             </table>
-
-            <div class="move-panel">
-                <p class="muted" style="margin-top: 0">
-                    Move time between projects without changing the month total (<strong>{{ cust.total_hm }}</strong
-                    >).
-                </p>
-                <div class="flex flex-wrap gap-3 align-items-end">
-                    <div class="flex flex-column gap-1" style="min-width: 10rem; flex: 1">
-                        <label :for="'move-from-' + cust.customer_id">From project</label>
-                        <Select
-                            :input-id="'move-from-' + cust.customer_id"
-                            v-model="moveState(cust).from"
-                            :options="fromProjectOptions(cust)"
-                            option-label="label"
-                            option-value="value"
-                            placeholder="Select source"
-                            class="w-full"
-                            :disabled="moveDisabled(cust)"
-                        />
-                    </div>
-                    <div class="flex flex-column gap-1" style="min-width: 10rem; flex: 1">
-                        <label :for="'move-to-' + cust.customer_id">To project</label>
-                        <Select
-                            :input-id="'move-to-' + cust.customer_id"
-                            v-model="moveState(cust).to"
-                            :options="toProjectOptions(cust)"
-                            option-label="label"
-                            option-value="value"
-                            placeholder="Select target"
-                            class="w-full"
-                            :disabled="moveDisabled(cust)"
-                        />
-                    </div>
-                    <div class="flex flex-column gap-1" style="width: 7rem">
-                        <label :for="'move-hm-' + cust.customer_id">Amount (HH:MM)</label>
-                        <InputText
-                            :id="'move-hm-' + cust.customer_id"
-                            v-model="moveState(cust).hm"
-                            placeholder="1:30"
-                            class="w-full"
-                            :disabled="moveDisabled(cust)"
-                            @keyup.enter="applyMove(cust)"
-                        />
-                    </div>
-                    <Button
-                        label="Move"
-                        icon="pi pi-arrows-h"
-                        :loading="moveLoadingId === cust.customer_id"
-                        :disabled="moveDisabled(cust)"
-                        @click="applyMove(cust)"
-                    />
-                </div>
-                <p v-if="cust.invoiced" class="muted mt-2 mb-0" style="font-size: 0.85rem">
-                    This month is marked invoiced — unmark it before moving time.
-                </p>
-                <p v-else-if="projectId" class="muted mt-2 mb-0" style="font-size: 0.85rem">
-                    Clear the project filter to move time.
-                </p>
-            </div>
         </div>
     </div>
 </template>
@@ -227,8 +233,8 @@ const projectId = ref(null);
 const month = ref(currentMonth());
 const pdfLoadingId = ref(null);
 const invoiceLoadingId = ref(null);
-const moveLoadingId = ref(null);
-const moveByCustomer = ref({});
+const moveLoadingKey = ref("");
+const moveByDay = ref({});
 
 const customerOptions = computed(() => customers.value.map((c) => ({ label: c.name, value: c.id })));
 
@@ -257,32 +263,57 @@ function entryNotes(entry) {
     return [{ project: "", comment: "" }];
 }
 
-function moveState(cust) {
-    const id = cust.customer_id;
-    if (!moveByCustomer.value[id]) {
-        moveByCustomer.value[id] = { from: null, to: null, hm: "" };
-    }
-    return moveByCustomer.value[id];
+function moveKey(cust, day) {
+    return `${cust.customer_id}|${day.date}`;
 }
 
-function moveDisabled(cust) {
-    return cust.invoiced || !!projectId.value;
+function moveState(cust, day) {
+    const key = moveKey(cust, day);
+    if (!moveByDay.value[key]) {
+        moveByDay.value[key] = { from: null, to: null, hm: "" };
+    }
+    return moveByDay.value[key];
+}
+
+function namedProjects(day) {
+    return (day.projects || []).filter((p) => p.project_id > 0);
+}
+
+function canMove(day) {
+    return namedProjects(day).length > 1;
+}
+
+function moveDisabled(cust, day) {
+    return cust.invoiced || !!projectId.value || !canMove(day);
 }
 
 function projectOptionLabel(proj) {
     return `${proj.name} (${proj.total_hm} ${proj.unit || ""})`.trim();
 }
 
-function fromProjectOptions(cust) {
-    return (cust.projects || [])
-        .filter((p) => p.project_id > 0 && p.total_hm !== "00:00")
+function sameProject(a, b) {
+    const left = Number(a);
+    const right = Number(b);
+    return left > 0 && left === right;
+}
+
+function onMoveFromChange(cust, day, fromId) {
+    const state = moveState(cust, day);
+    if (sameProject(fromId, state.to)) {
+        state.to = null;
+    }
+}
+
+function fromProjectOptions(day) {
+    return namedProjects(day)
+        .filter((p) => p.total_hm !== "00:00")
         .map((p) => ({ value: p.project_id, label: projectOptionLabel(p) }));
 }
 
-function toProjectOptions(cust) {
-    const from = moveState(cust).from;
-    return (cust.projects || [])
-        .filter((p) => p.project_id > 0 && p.project_id !== from)
+function toProjectOptions(cust, day) {
+    const from = moveState(cust, day).from;
+    return namedProjects(day)
+        .filter((p) => !sameProject(p.project_id, from))
         .map((p) => ({ value: p.project_id, label: projectOptionLabel(p) }));
 }
 
@@ -351,9 +382,9 @@ async function toggleInvoiced(cust) {
     }
 }
 
-async function applyMove(cust) {
-    const state = moveState(cust);
-    if (moveDisabled(cust)) return;
+async function applyMove(cust, day) {
+    const state = moveState(cust, day);
+    if (moveDisabled(cust, day)) return;
     if (!state.from || !state.to) {
         toast.add({
             severity: "warn",
@@ -363,11 +394,11 @@ async function applyMove(cust) {
         });
         return;
     }
-    if (state.from === state.to) {
+    if (sameProject(state.from, state.to)) {
         toast.add({
             severity: "warn",
             summary: "Validation",
-            detail: "From and to must be different projects",
+            detail: "Choose a different project to move the time to",
             life: 3000,
         });
         return;
@@ -384,29 +415,42 @@ async function applyMove(cust) {
     }
 
     const prevTotal = cust.total_hm;
-    moveLoadingId.value = cust.customer_id;
+    const prevDay = day.total_hm;
+    const date = day.date;
+    const customerId = cust.customer_id;
+    moveLoadingKey.value = moveKey(cust, day);
     try {
         const { data } = await api.put("/timesheets/reallocate", {
-            customer_id: cust.customer_id,
+            customer_id: customerId,
             month: month.value,
+            date,
             moves: [{ from_project_id: state.from, to_project_id: state.to, hm }],
         });
+        state.hm = "";
+        await load();
+        const afterCust = (report.value?.customers || []).find((c) => c.customer_id === customerId);
+        const afterDay = (afterCust?.days || []).find((d) => d.date === date);
         if (prevTotal && data.total_hm && data.total_hm !== prevTotal) {
             toast.add({
                 severity: "error",
                 summary: "Sum mismatch",
-                detail: `Total changed from ${prevTotal} to ${data.total_hm} — please refresh and check`,
+                detail: `Month total changed from ${prevTotal} to ${data.total_hm} — please refresh and check`,
+                life: 6000,
+            });
+        } else if (afterDay && prevDay && afterDay.total_hm !== prevDay) {
+            toast.add({
+                severity: "error",
+                summary: "Sum mismatch",
+                detail: `Day total changed from ${prevDay} to ${afterDay.total_hm} — please refresh and check`,
                 life: 6000,
             });
         } else {
             toast.add({ severity: "success", summary: "Time moved", life: 2000 });
         }
-        state.hm = "";
-        await load();
     } catch (err) {
         toast.add({ severity: "error", summary: "Error", detail: errorMessage(err), life: 4000 });
     } finally {
-        moveLoadingId.value = null;
+        moveLoadingKey.value = "";
     }
 }
 

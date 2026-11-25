@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/zlib"
 	"io"
+	"regexp"
+	"strconv"
 	"testing"
 	"time"
 
@@ -33,7 +35,7 @@ func TestSummarizeReportsByProject(t *testing.T) {
 		3: {ID: 3, Name: "Travel", Unit: "kilometers"},
 	}
 
-	got := summarizeReportsByProject(reports, projects)
+	got := summarizeReportsByProject(reports, projects, nil, nil)
 	if len(got) != 3 {
 		t.Fatalf("expected 3 projects, got %d", len(got))
 	}
@@ -53,11 +55,11 @@ func TestSummarizeReportsByProject(t *testing.T) {
 	}
 }
 
-func TestSummarizeReportsByProject_SharedIntervalOnce(t *testing.T) {
-	start := time.Date(2026, 8, 1, 9, 0, 0, 0, time.Local)
+func TestSummarizeReportsByProject_SharedStaysOnAnchor(t *testing.T) {
+	start := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
 	stop := start.Add(150 * time.Minute)
 	reports := []models.Report{
-		{ProjectID: 1, Start: start, Stop: &stop, Lines: []models.ReportLine{
+		{ID: 7, ProjectID: 1, Start: start, Stop: &stop, Lines: []models.ReportLine{
 			{ProjectID: 1, Comment: "a"},
 			{ProjectID: 2, Comment: "b"},
 		}},
@@ -66,17 +68,20 @@ func TestSummarizeReportsByProject_SharedIntervalOnce(t *testing.T) {
 		1: {ID: 1, Name: "Alpha", Unit: "hours"},
 		2: {ID: 2, Name: "Beta", Unit: "hours"},
 	}
-	got := summarizeReportsByProject(reports, projects)
-	if len(got) != 1 {
-		t.Fatalf("expected only the shared row, got %+v", got)
+	got := summarizeReportsByProject(reports, projects, nil, nil)
+	if len(got) != 1 || got[0].Name != "Alpha" || got[0].Duration != 150*time.Minute {
+		t.Fatalf("got %+v", got)
 	}
-	if got[0].Name != "Several projects" || got[0].Duration != 150*time.Minute {
-		t.Fatalf("got %+v", got[0])
+
+	shares := dayShares{dayShareKey(0, 0, "2026-08-01"): {1: int64((120 * time.Minute) / time.Second), 2: int64((30 * time.Minute) / time.Second)}}
+	got = summarizeReportsByProject(reports, projects, time.UTC, shares)
+	if len(got) != 2 || got[0].Name != "Alpha" || got[0].Duration != 120*time.Minute || got[1].Name != "Beta" || got[1].Duration != 30*time.Minute {
+		t.Fatalf("split: %+v", got)
 	}
 }
 
 func TestSummarizeReportsByProject_Empty(t *testing.T) {
-	got := summarizeReportsByProject(nil, nil)
+	got := summarizeReportsByProject(nil, nil, nil, nil)
 	if len(got) != 0 {
 		t.Fatalf("expected empty, got %d", len(got))
 	}
@@ -88,7 +93,7 @@ func TestSummarizeReportsByProject_UnknownProject(t *testing.T) {
 	reports := []models.Report{
 		{ProjectID: 99, Start: start, Stop: &stop},
 	}
-	got := summarizeReportsByProject(reports, map[int64]models.Project{})
+	got := summarizeReportsByProject(reports, map[int64]models.Project{}, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("expected 1, got %d", len(got))
 	}
@@ -232,11 +237,11 @@ func TestProjectSummariesForCustomer_IncludesActiveWithoutTime(t *testing.T) {
 		{ID: 3, CustomerID: 7, Name: "Gamma", Unit: "hours", Active: true},
 		{ID: 4, CustomerID: 7, Name: "Old", Active: false},
 	}
-	got := projectSummariesForCustomer(reports, projects, catalog)
+	got := projectSummariesForCustomer(reports, projects, catalog, nil, nil)
 	if len(got) != 3 {
 		t.Fatalf("got %+v", got)
 	}
-	if got[0].Name != "Alpha" || got[0].Duration != 0 {
+	if got[0].Name != "Alpha" || got[0].Duration != 90*time.Minute {
 		t.Fatalf("alpha: %+v", got[0])
 	}
 	if got[1].Name != "Beta" || got[1].Duration != 0 {
@@ -255,13 +260,13 @@ func TestGenerateTimesheetPDF_ProjectColumn(t *testing.T) {
 			Stop:   "10:45",
 			Length: "01:30",
 			Notes: []timesheetNote{
-				{Project: "Alpha", Comment: "fixed the valve"},
-				{Project: "Beta", Comment: "called the site"},
+				{Project: "Alpha", Comment: "fixed the valve", Length: "01:30"},
+				{Project: "Beta", Comment: "called the site", Length: "00:00"},
 			},
 		}},
 		Total: 90 * time.Minute,
 	}}
-	pdfBytes, err := generateTimesheetPDF("Acme", "", "August 2026", days, 90*time.Minute, []timesheetProjectSummary{
+	pdfBytes, err := generateTimesheetPDF("Acme", "August 2026", days, 90*time.Minute, []timesheetProjectSummary{
 		{Name: "Alpha", Unit: "hours", Duration: time.Hour},
 		{Name: "Gamma", Unit: "hours", Duration: 0},
 	})
@@ -269,16 +274,106 @@ func TestGenerateTimesheetPDF_ProjectColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	plain := pdfStreams(t, pdfBytes)
-	for _, s := range []string{"Project", "Comment", "Alpha", "fixed the valve", "Beta", "called the site", "09:15", "01:30", "Gamma", "00:00"} {
+	for _, s := range []string{"Start", "Stop", "Project", "Comment", "Length", "Alpha", "fixed the valve", "Beta", "called the site", "09:15", "10:45", "01:30", "00:00", "Gamma"} {
 		if !bytes.Contains(plain, []byte(s)) {
 			t.Errorf("pdf missing %q", s)
 		}
 	}
-	// Project column is written before the comment column in the day table header.
+	start := bytes.Index(plain, []byte("(Start)"))
+	stop := bytes.Index(plain, []byte("(Stop)"))
 	proj := bytes.Index(plain, []byte("(Project)"))
 	comment := bytes.Index(plain, []byte("(Comment)"))
-	if proj < 0 || comment < 0 || proj > comment {
-		t.Fatalf("header order project=%d comment=%d", proj, comment)
+	length := bytes.Index(plain, []byte("(Length)"))
+	if start < 0 || stop < start || proj < stop || comment < proj || length < comment {
+		t.Fatalf("header order start=%d stop=%d project=%d comment=%d length=%d", start, stop, proj, comment, length)
+	}
+	if bytes.Contains(plain, []byte("Project:")) {
+		t.Fatal("pdf still prints a project header")
+	}
+}
+
+func TestGenerateTimesheetPDF_ListsEachDaysProjects(t *testing.T) {
+	morningStart := time.Date(2026, 10, 9, 9, 16, 0, 0, time.UTC)
+	morningStop := morningStart.Add(2*time.Hour + 52*time.Minute)
+	afternoonStart := time.Date(2026, 10, 9, 12, 38, 0, 0, time.UTC)
+	afternoonStop := afternoonStart.Add(3*time.Hour + 25*time.Minute)
+	reports := []models.Report{
+		{
+			ID: 1, CustomerID: 13, ProjectID: 66,
+			Start: morningStart, Stop: &morningStop,
+			Lines: []models.ReportLine{{ProjectID: 66, Comment: "flytt av server"}},
+		},
+		{
+			ID: 2, CustomerID: 13, ProjectID: 22,
+			Start: afternoonStart, Stop: &afternoonStop,
+			Lines: []models.ReportLine{{ProjectID: 22}},
+		},
+	}
+	names := map[int64]string{66: "SYSADM", 22: "Wholesale"}
+	projects := map[int64]models.Project{
+		66: {ID: 66, CustomerID: 13, Name: "SYSADM"},
+		22: {ID: 22, CustomerID: 13, Name: "Wholesale"},
+	}
+	days, total := groupReportsByDay(reports, names, time.UTC)
+	days = daysWithSharedProjects(days, reports, projects, 13, time.UTC, nil)
+	if len(days) != 1 || len(days[0].Entries) != 2 || len(days[0].Entries[0].Notes) != 2 || len(days[0].Entries[1].Notes) != 2 {
+		t.Fatalf("days: %+v", days)
+	}
+	pdfBytes, err := generateTimesheetPDF("IT Norrbotten", "October 2026", days, total, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := pdfStreams(t, pdfBytes)
+	if bytes.Count(plain, []byte("SYSADM")) < 2 || bytes.Count(plain, []byte("Wholesale")) < 2 {
+		t.Fatalf("each report should name both projects:\n%s", plain)
+	}
+	for _, s := range []string{"09:16", "12:08", "12:38", "16:03", "flytt av server", "02:52", "03:25"} {
+		if !bytes.Contains(plain, []byte(s)) {
+			t.Errorf("pdf missing %q", s)
+		}
+	}
+}
+
+func TestGenerateTimesheetPDF_TopAlignsClocks(t *testing.T) {
+	days := []timesheetDay{{
+		Date: "2026-11-02",
+		Entries: []timesheetDayEntry{{
+			Start: "10:30",
+			Stop:  "13:05",
+			Notes: []timesheetNote{{
+				Project: "Wholesale",
+				Comment: "Disk med Fredrik, byte switch RFN AK till ITN Cisco 1200 and then more words so the comment wraps onto several lines beside the clocks",
+				Length:  "02:35",
+			}},
+		}},
+		Total: 2*time.Hour + 35*time.Minute,
+	}}
+	pdfBytes, err := generateTimesheetPDF("IT Norrbotten", "November 2026", days, days[0].Total, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := pdfStreams(t, pdfBytes)
+	td := regexp.MustCompile(`BT ([\d.]+) ([\d.]+) Td \(([^)]*)\) ?Tj ET`)
+	firstY := map[string]float64{}
+	for _, m := range td.FindAllSubmatch(plain, -1) {
+		text := string(m[3])
+		if _, seen := firstY[text]; seen {
+			continue
+		}
+		y, err := strconv.ParseFloat(string(m[2]), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstY[text] = y
+	}
+	startY, ok := firstY["10:30"]
+	if !ok {
+		t.Fatalf("no clock position in %s", plain)
+	}
+	for _, label := range []string{"13:05", "02:35", "Wholesale"} {
+		if firstY[label] != startY {
+			t.Fatalf("%s baseline %v, start baseline %v", label, firstY[label], startY)
+		}
 	}
 }
 

@@ -631,7 +631,14 @@ func (h *ReportsHandler) Monthly(c echo.Context) error {
 		return internal(c, "failed to load projects")
 	}
 
-	customers, grandTotal := buildMonthlyCustomers(reports, projectsByID, customersByID, catalog, customerID, projectID, loc)
+	shareUsers := distinctIDs(reports, func(r models.Report) int64 { return r.UserID })
+	shareCustomers := distinctIDs(reports, func(r models.Report) int64 { return r.CustomerID })
+	shares, err := loadDayShares(h.DB, shareUsers, shareCustomers)
+	if err != nil {
+		return internal(c, "failed to load billing splits")
+	}
+
+	customers, grandTotal := buildMonthlyCustomers(reports, projectsByID, customersByID, catalog, customerID, projectID, loc, shares)
 	resp := dto.MonthlyReportResponse{
 		Month:      monthStr,
 		UserID:     userID,
@@ -765,7 +772,13 @@ func buildMonthlyCustomers(
 	filterCustomerID int64,
 	filterProjectID int64,
 	loc *time.Location,
+	shares dayShares,
 ) ([]dto.MonthlyCustomer, time.Duration) {
+	for _, p := range catalog {
+		if _, ok := projectsByID[p.ID]; !ok {
+			projectsByID[p.ID] = p
+		}
+	}
 	byCust := map[int64][]models.Report{}
 	var custIDs []int64
 	seen := map[int64]bool{}
@@ -810,8 +823,8 @@ func buildMonthlyCustomers(
 			TotalHours:  total.Hours(),
 			TotalHM:     formatHM(total),
 			Invoiced:    allReportsInvoiced(reps),
-			Days:        monthlyDays(days),
-			Projects:    monthlyProjectSummaries(reps, projectsByID, projectsForCustomer(catalog, cid, filterProjectID)),
+			Days:        monthlyDays(days, reportsByLocalDate(reps, loc), projectsByID, cid, shares),
+			Projects:    monthlyProjectSummaries(reps, projectsByID, projectsForCustomer(catalog, cid, filterProjectID), loc, shares),
 		}
 		if mc.Name == "" {
 			if cid > 0 {
@@ -835,20 +848,44 @@ func customerSortName(id int64, customersByID map[int64]models.Customer) string 
 	return fmt.Sprintf("customer #%d", id)
 }
 
-func monthlyDays(days []timesheetDay) []dto.MonthlyDay {
+func reportsByLocalDate(reports []models.Report, loc *time.Location) map[string][]models.Report {
+	if loc == nil {
+		loc = time.UTC
+	}
+	out := map[string][]models.Report{}
+	for _, r := range reports {
+		if r.Stop == nil || r.Stop.Sub(r.Start) < 0 {
+			continue
+		}
+		dateStr := r.Start.In(loc).Format("2006-01-02")
+		out[dateStr] = append(out[dateStr], r)
+	}
+	return out
+}
+
+func monthlyDays(days []timesheetDay, byDate map[string][]models.Report, projectsByID map[int64]models.Project, customerID int64, shares dayShares) []dto.MonthlyDay {
 	out := make([]dto.MonthlyDay, 0, len(days))
 	for _, day := range days {
+		dayReports := byDate[day.Date]
+		var userID int64
+		if len(dayReports) > 0 {
+			userID = dayReports[0].UserID
+		}
+		billing := dayBilling(dayReports, shares[dayShareKey(userID, customerID, day.Date)])
 		md := dto.MonthlyDay{
 			Date:       day.Date,
 			TotalHours: day.Total.Hours(),
 			TotalHM:    formatHM(day.Total),
 			Entries:    make([]dto.MonthlyEntry, 0, len(day.Entries)),
+			Projects:   dayProjectRows(dayReports, projectsByID, billing),
 		}
+		// One project order for the day, first appearance across the reports.
+		// Each report then lists that whole set. Comments stay on the report
+		// that wrote them; a project the report did not name has an empty comment.
+		dayProjects := projectsInDayOrder(day.Entries)
+		seenProject := map[int64]bool{}
 		for _, e := range day.Entries {
-			notes := make([]dto.MonthlyNote, 0, len(e.Notes))
-			for _, n := range e.Notes {
-				notes = append(notes, dto.MonthlyNote{Project: n.Project, Comment: n.Comment})
-			}
+			notes := notesForDayProjects(e.Notes, dayProjects, billing, seenProject)
 			if len(notes) == 0 {
 				notes = []dto.MonthlyNote{{}}
 			}
@@ -863,6 +900,104 @@ func monthlyDays(days []timesheetDay) []dto.MonthlyDay {
 		}
 		out = append(out, md)
 	}
+	return out
+}
+
+// projectsInDayOrder is the projects named on this day, in the order they
+// first appear. Reports are already in start-time order.
+func projectsInDayOrder(entries []timesheetDayEntry) []timesheetNote {
+	var order []timesheetNote
+	seen := map[int64]bool{}
+	for _, e := range entries {
+		for _, n := range e.Notes {
+			if n.ProjectID <= 0 || seen[n.ProjectID] {
+				continue
+			}
+			seen[n.ProjectID] = true
+			order = append(order, timesheetNote{ProjectID: n.ProjectID, Project: n.Project})
+		}
+	}
+	return order
+}
+
+// notesForDayProjects lists every project named that day on this report.
+// own holds the comments written on this report. A project this report did
+// not name is listed with an empty comment and no length. Length is the
+// day's share, written once, on the first report that actually names the project.
+func notesForDayProjects(own []timesheetNote, dayProjects []timesheetNote, billing map[int64]int64, seenProject map[int64]bool) []dto.MonthlyNote {
+	byID := map[int64][]timesheetNote{}
+	var unnamed []timesheetNote
+	for _, n := range own {
+		if n.ProjectID <= 0 {
+			unnamed = append(unnamed, n)
+			continue
+		}
+		byID[n.ProjectID] = append(byID[n.ProjectID], n)
+	}
+	notes := make([]dto.MonthlyNote, 0, len(dayProjects)+len(unnamed))
+	for _, p := range dayProjects {
+		rows := byID[p.ProjectID]
+		namedHere := len(rows) > 0
+		if !namedHere {
+			rows = []timesheetNote{{ProjectID: p.ProjectID, Project: p.Project}}
+		}
+		for _, n := range rows {
+			project := n.Project
+			if project == "" {
+				project = p.Project
+			}
+			note := dto.MonthlyNote{ProjectID: n.ProjectID, Project: project, Comment: n.Comment}
+			if namedHere && !seenProject[n.ProjectID] {
+				seenProject[n.ProjectID] = true
+				note.LengthHM = formatHM(time.Duration(billing[n.ProjectID]) * time.Second)
+			}
+			notes = append(notes, note)
+		}
+	}
+	for _, n := range unnamed {
+		notes = append(notes, dto.MonthlyNote{Project: n.Project, Comment: n.Comment})
+	}
+	return notes
+}
+
+// dayProjectRows is every project named that day, with its share of the day's time.
+func dayProjectRows(reports []models.Report, projectsByID map[int64]models.Project, billing map[int64]int64) []dto.MonthlyProject {
+	ids := map[int64]bool{}
+	for id := range billing {
+		if id > 0 {
+			ids[id] = true
+		}
+	}
+	for id := range projectsNamedOnReports(reports) {
+		ids[id] = true
+	}
+	out := make([]dto.MonthlyProject, 0, len(ids))
+	for id := range ids {
+		sec := billing[id]
+		row := dto.MonthlyProject{
+			ProjectID:  id,
+			Name:       fmt.Sprintf("Project #%d", id),
+			Unit:       "hours",
+			TotalHours: time.Duration(sec).Seconds() / 3600,
+			TotalHM:    formatHM(time.Duration(sec) * time.Second),
+		}
+		if p, ok := projectsByID[id]; ok {
+			if name := strings.TrimSpace(p.Name); name != "" {
+				row.Name = name
+			}
+			if unit := strings.TrimSpace(p.Unit); unit != "" {
+				row.Unit = unit
+			}
+			row.CostCenter = p.CostCenter
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].ProjectID < out[j].ProjectID
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
 	return out
 }
 
@@ -893,12 +1028,12 @@ func allReportsInvoiced(reports []models.Report) bool {
 }
 
 // projectSummariesForCustomer is the summary table shared by the monthly report
-// and the timesheet PDF. Time is counted on a project only when the interval
-// names that project alone. Shared intervals are left off. Every active project
-// is listed, with zero time when it has none. An inactive project is listed
-// only when it has time.
-func projectSummariesForCustomer(reports []models.Report, projectsByID map[int64]models.Project, catalog []models.Project) []timesheetProjectSummary {
-	sums := summarizeReportsByProject(reports, projectsByID)
+// and the timesheet PDF. An interval is billed on its own project until time
+// is moved; a move stores the split and leaves the interval itself unchanged.
+// Every active project is listed, with zero time when it has none. An inactive
+// project is listed only when it has time.
+func projectSummariesForCustomer(reports []models.Report, projectsByID map[int64]models.Project, catalog []models.Project, loc *time.Location, shares dayShares) []timesheetProjectSummary {
+	sums := summarizeReportsByProject(reports, projectsByID, loc, shares)
 	out := make([]timesheetProjectSummary, 0, len(sums)+len(catalog))
 	seen := map[int64]bool{}
 	for _, s := range sums {
@@ -937,7 +1072,7 @@ func projectSummariesForCustomer(reports []models.Report, projectsByID map[int64
 }
 
 // monthlyProjectSummaries is the customer's "Summary by project".
-func monthlyProjectSummaries(reports []models.Report, projectsByID map[int64]models.Project, catalog []models.Project) []dto.MonthlyProject {
+func monthlyProjectSummaries(reports []models.Report, projectsByID map[int64]models.Project, catalog []models.Project, loc *time.Location, shares dayShares) []dto.MonthlyProject {
 	lookup := make(map[int64]models.Project, len(projectsByID)+len(catalog))
 	for id, p := range projectsByID {
 		lookup[id] = p
@@ -945,7 +1080,7 @@ func monthlyProjectSummaries(reports []models.Report, projectsByID map[int64]mod
 	for _, p := range catalog {
 		lookup[p.ID] = p
 	}
-	sums := projectSummariesForCustomer(reports, projectsByID, catalog)
+	sums := projectSummariesForCustomer(reports, projectsByID, catalog, loc, shares)
 	out := make([]dto.MonthlyProject, 0, len(sums))
 	for _, s := range sums {
 		row := dto.MonthlyProject{

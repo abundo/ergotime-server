@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"errors"
-	"fmt"
+	"time"
 
 	"github.com/abundo/ergotime-server/internal/models"
 	"gorm.io/gorm"
@@ -110,7 +110,31 @@ func writeReport(tx *gorm.DB, item *models.Report, isNew bool) error {
 	} else if err := tx.Save(item).Error; err != nil {
 		return err
 	}
-	return replaceLines(tx, item.ID, item.Lines)
+	if err := replaceLines(tx, item.ID, item.Lines); err != nil {
+		return err
+	}
+	// Editing the worked interval drops that day's billing split. The whole
+	// day is billed on each report's own project again until time is moved.
+	return invalidateDayShares(tx, item)
+}
+
+func invalidateDayShares(tx *gorm.DB, item *models.Report) error {
+	if item.UserID == 0 || item.CustomerID == 0 || item.Start.IsZero() {
+		return nil
+	}
+	days := []string{item.Start.UTC().Format("2006-01-02")}
+	var tz string
+	_ = tx.Model(&models.User{}).Where("_id = ?", item.UserID).Pluck("timezone", &tz).Error
+	if tz != "" {
+		if loc, err := time.LoadLocation(tz); err == nil {
+			local := item.Start.In(loc).Format("2006-01-02")
+			if local != days[0] {
+				days = append(days, local)
+			}
+		}
+	}
+	return tx.Where("user_id = ? AND customer_id = ? AND day IN ?", item.UserID, item.CustomerID, days).
+		Delete(&models.DayShare{}).Error
 }
 
 func lineError(err error) (string, bool) {
@@ -124,31 +148,4 @@ func lineError(err error) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-func retargetReportLine(tx *gorm.DB, reportID, projectID int64, comment string) error {
-	var n int64
-	if err := tx.Model(&models.ReportLine{}).Where("report_id = ?", reportID).Count(&n).Error; err != nil {
-		return err
-	}
-	if n == 0 {
-		return tx.Create(&models.ReportLine{
-			ReportID:  reportID,
-			ProjectID: projectID,
-			Comment:   comment,
-			Position:  0,
-		}).Error
-	}
-	return tx.Model(&models.ReportLine{}).Where("report_id = ?", reportID).Updates(map[string]any{
-		"project_id": projectID,
-		"comment":    comment,
-		"position":   0,
-	}).Error
-}
-
-// singleLineSQL excludes reports whose time is shared by several project lines.
-func singleLineSQL(column string) string {
-	return fmt.Sprintf(`%s NOT IN (
-		SELECT report_id FROM report_line GROUP BY report_id HAVING COUNT(*) > 1
-	)`, column)
 }

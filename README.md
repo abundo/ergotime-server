@@ -145,24 +145,24 @@ All JSON endpoints under `/api` require authentication except:
 
 Authenticated (cookie JWT, `Authorization: Bearer <jwt>`, or HTTP Basic):
 
-| Method         | Path                                 | Notes                                                |
-| -------------- | ------------------------------------ | ---------------------------------------------------- |
-| GET            | `/api/auth/me`                       | Current user                                         |
-| GET/POST       | `/api/users`                         | Admin list/create                                    |
-| GET/PUT/DELETE | `/api/users/:id`                     | Admin; self can change own password                  |
-| GET/POST…      | `/api/customers`                     | Mutations require admin                              |
-| GET/POST…      | `/api/projects`                      | Mutations require admin; `?customer_id=`             |
-| GET/POST…      | `/api/reports`                       | Time entries (`project_id`); non-admins see own only |
-| POST           | `/api/reports/batch`                 | Desktop batch push (deletes/creates/updates)         |
-| GET            | `/api/reports/monthly?month=YYYY-MM` | Aggregated SPA report                                |
-| GET            | `/api/timesheets?month=YYYY-MM`      | Customers with time in month                         |
-| GET            | `/api/timesheets/projects`           | Project totals for customer/month                    |
-| PUT            | `/api/timesheets/reallocate`         | Move time between projects (sum preserved)           |
-| GET            | `/api/timesheets/pdf`                | Monthly PDF (summary lists every active project)     |
-| PUT            | `/api/timesheets/invoiced`           | Mark customer/month invoiced                         |
-| GET            | `/api/activity`                      | Legacy alias (desktop client)                        |
-| GET            | `/api/report/sync/:seq`              | Incremental report sync (pull)                       |
-| POST/PUT       | `/api/report`                        | Legacy form-urlencoded support                       |
+| Method         | Path                                 | Notes                                                           |
+| -------------- | ------------------------------------ | --------------------------------------------------------------- |
+| GET            | `/api/auth/me`                       | Current user                                                    |
+| GET/POST       | `/api/users`                         | Admin list/create                                               |
+| GET/PUT/DELETE | `/api/users/:id`                     | Admin; self can change own password                             |
+| GET/POST…      | `/api/customers`                     | Mutations require admin                                         |
+| GET/POST…      | `/api/projects`                      | Mutations require admin; `?customer_id=`                        |
+| GET/POST…      | `/api/reports`                       | Time entries (`project_id`); non-admins see own only            |
+| POST           | `/api/reports/batch`                 | Desktop batch push (deletes/creates/updates)                    |
+| GET            | `/api/reports/monthly?month=YYYY-MM` | Aggregated SPA report                                           |
+| GET            | `/api/timesheets?month=YYYY-MM`      | Customers with time in month                                    |
+| GET            | `/api/timesheets/projects`           | Project totals for customer/month                               |
+| PUT            | `/api/timesheets/reallocate`         | Bill part of a day's time to another project (report unchanged) |
+| GET            | `/api/timesheets/pdf`                | Monthly PDF (summary lists every active project)                |
+| PUT            | `/api/timesheets/invoiced`           | Mark customer/month invoiced                                    |
+| GET            | `/api/activity`                      | Legacy alias (desktop client)                                   |
+| GET            | `/api/report/sync/:seq`              | Incremental report sync (pull)                                  |
+| POST/PUT       | `/api/report`                        | Legacy form-urlencoded support                                  |
 
 List responses use `{ "data": [ ... ] }` for compatibility with the old server.
 

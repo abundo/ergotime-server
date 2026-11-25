@@ -10,14 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/abundo/ergotime-server/internal/database"
 	"github.com/abundo/ergotime-server/internal/dto"
 	"github.com/abundo/ergotime-server/internal/middleware"
 	"github.com/abundo/ergotime-server/internal/models"
 	"github.com/go-pdf/fpdf"
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // TimesheetsHandler manages customer timesheet listing, PDF export, and invoice status.
@@ -26,10 +24,13 @@ type TimesheetsHandler struct {
 }
 
 // timesheetNote is one project and the comment written for that project.
-// Several notes share one worked interval.
+// Several notes share one worked interval. Length is that project's share of
+// the whole day when this row shows it, and empty on the other rows.
 type timesheetNote struct {
-	Project string
-	Comment string
+	ProjectID int64
+	Project   string
+	Comment   string
+	Length    string
 }
 
 type timesheetDayEntry struct {
@@ -224,33 +225,33 @@ func (h *TimesheetsHandler) buildTimesheetProjects(
 	if err := attachLines(h.DB, reports); err != nil {
 		return dto.TimesheetProjectsResponse{}, err
 	}
+	userIDs := distinctIDs(reports, func(r models.Report) int64 { return r.UserID })
+	shares, err := loadDayShares(h.DB, userIDs, []int64{customerID})
+	if err != nil {
+		return dto.TimesheetProjectsResponse{}, err
+	}
 
 	byProj := map[int64]*agg{}
 	var grandSec int64
-	var shared agg
+	grouped := map[string][]models.Report{}
 	for _, r := range reports {
-		if r.Stop == nil {
+		grandSec += durationSeconds(r)
+		if durationSeconds(r) <= 0 {
 			continue
 		}
-		d := r.Stop.Sub(r.Start)
-		if d < 0 {
-			continue
+		key := reportDayKey(r, time.UTC)
+		grouped[key] = append(grouped[key], r)
+	}
+	for key, dayReports := range grouped {
+		for projectID, sec := range dayBilling(dayReports, shares[key]) {
+			a := byProj[projectID]
+			if a == nil {
+				a = &agg{}
+				byProj[projectID] = a
+			}
+			a.sec += sec
+			a.count++
 		}
-		sec := int64(d / time.Second)
-		grandSec += sec
-		projectID, isShared := models.AttributedProject(r)
-		if isShared {
-			shared.sec += sec
-			shared.count++
-			continue
-		}
-		a := byProj[projectID]
-		if a == nil {
-			a = &agg{}
-			byProj[projectID] = a
-		}
-		a.sec += sec
-		a.count++
 	}
 
 	// Show projects that have time, plus all active projects (targets for moves).
@@ -309,20 +310,6 @@ func (h *TimesheetsHandler) buildTimesheetProjects(
 		}
 		return strings.ToLower(rows[i].Name) < strings.ToLower(rows[j].Name)
 	})
-	if shared.sec > 0 || shared.count > 0 {
-		dur := time.Duration(shared.sec) * time.Second
-		rows = append(rows, dto.TimesheetProjectRow{
-			ProjectID:  0,
-			Name:       "Several projects",
-			Unit:       "hours",
-			TotalHours: dur.Hours(),
-			TotalHM:    formatHM(dur),
-			TotalSec:   shared.sec,
-			EntryCount: shared.count,
-			Active:     false,
-		})
-	}
-
 	grand := time.Duration(grandSec) * time.Second
 	return dto.TimesheetProjectsResponse{
 		Month:      monthStr,
@@ -334,8 +321,8 @@ func (h *TimesheetsHandler) buildTimesheetProjects(
 	}, nil
 }
 
-// Reallocate moves reported time between projects for one customer/month.
-// The grand total of reported time is preserved (only project_id assignment changes).
+// Reallocate moves reported time between projects for one day of a customer month.
+// The day's total, and the month total, stay the same (only project assignment changes).
 // PUT /api/timesheets/reallocate
 func (h *TimesheetsHandler) Reallocate(c echo.Context) error {
 	var req dto.TimesheetReallocateRequest
@@ -348,7 +335,11 @@ func (h *TimesheetsHandler) Reallocate(c echo.Context) error {
 	if len(req.Moves) == 0 {
 		return badRequest(c, "moves is required")
 	}
-	monthStr, start, end, _, err := h.monthRange(c, req.Month)
+	monthStr, start, end, loc, err := h.monthRange(c, req.Month)
+	if err != nil {
+		return badRequest(c, err.Error())
+	}
+	dayStart, dayEnd, err := dayWindowInMonth(req.Date, monthStr, loc)
 	if err != nil {
 		return badRequest(c, err.Error())
 	}
@@ -392,7 +383,7 @@ func (h *TimesheetsHandler) Reallocate(c echo.Context) error {
 			return badRequest(c, fmt.Sprintf("moves[%d]: from_project_id and to_project_id are required", i))
 		}
 		if m.FromProjectID == m.ToProjectID {
-			return badRequest(c, fmt.Sprintf("moves[%d]: from and to must differ", i))
+			return badRequest(c, fmt.Sprintf("moves[%d]: choose a different project to move the time to", i))
 		}
 		if !projOK[m.FromProjectID] || !projOK[m.ToProjectID] {
 			return badRequest(c, fmt.Sprintf("moves[%d]: projects must belong to the customer", i))
@@ -415,8 +406,9 @@ func (h *TimesheetsHandler) Reallocate(c echo.Context) error {
 	}
 
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		userID := middleware.UserIDFromContext(c)
 		for _, mv := range moves {
-			if err := moveTimeBetweenProjects(tx, req.CustomerID, start, end, mv.from, mv.to, mv.sec); err != nil {
+			if err := moveTimeBetweenProjects(tx, userID, req.CustomerID, dayStart.Format("2006-01-02"), dayStart, dayEnd, mv.from, mv.to, mv.sec); err != nil {
 				return err
 			}
 		}
@@ -440,139 +432,6 @@ func (h *TimesheetsHandler) Reallocate(c echo.Context) error {
 type badRequestError struct{ msg string }
 
 func (e *badRequestError) Error() string { return e.msg }
-
-// moveTimeBetweenProjects reassigns duration from one project to another within
-// a customer/month window. Grand total is unchanged. Splits the last report if needed.
-func moveTimeBetweenProjects(
-	tx *gorm.DB,
-	customerID int64,
-	start, end time.Time,
-	fromID, toID, wantSec int64,
-) error {
-	if wantSec <= 0 {
-		return nil
-	}
-
-	var reports []models.Report
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where(
-			`project_id = ? AND deleted = ? AND stop IS NOT NULL AND start >= ? AND start < ?
-			 AND project_id IN (SELECT _id FROM project WHERE customer_id = ?)
-			 AND `+singleLineSQL("report._id"),
-			fromID, false, start, end, customerID,
-		).
-		Order("start DESC").
-		Find(&reports).Error
-	if err != nil {
-		return fmt.Errorf("load reports: %w", err)
-	}
-
-	var available int64
-	for _, r := range reports {
-		if r.Stop == nil {
-			continue
-		}
-		d := r.Stop.Sub(r.Start)
-		if d > 0 {
-			available += int64(d / time.Second)
-		}
-	}
-	if available < wantSec {
-		return &badRequestError{
-			msg: fmt.Sprintf("not enough time on project %d: have %s, need %s",
-				fromID, formatHM(time.Duration(available)*time.Second), formatHM(time.Duration(wantSec)*time.Second)),
-		}
-	}
-
-	remaining := wantSec
-	now := time.Now().UTC()
-	for i := range reports {
-		if remaining <= 0 {
-			break
-		}
-		r := &reports[i]
-		if r.Stop == nil {
-			continue
-		}
-		durSec := int64(r.Stop.Sub(r.Start) / time.Second)
-		if durSec <= 0 {
-			continue
-		}
-
-		if durSec <= remaining {
-			// Move whole entry.
-			seq, err := database.NextReportSeq(tx)
-			if err != nil {
-				return fmt.Errorf("seq: %w", err)
-			}
-			r.ProjectID = toID
-			r.Seq = seq
-			r.Modified = now
-			if err := tx.Save(r).Error; err != nil {
-				return fmt.Errorf("reassign report: %w", err)
-			}
-			if err := retargetReportLine(tx, r.ID, toID, r.Comment); err != nil {
-				return fmt.Errorf("reassign line: %w", err)
-			}
-			remaining -= durSec
-			continue
-		}
-
-		// Split: keep (durSec - remaining) on from; move remaining to to.
-		// Cut from the end of the interval.
-		moveDur := time.Duration(remaining) * time.Second
-		keepDur := time.Duration(durSec-remaining) * time.Second
-		cut := r.Start.Add(keepDur)
-		origStop := *r.Stop
-
-		seqKeep, err := database.NextReportSeq(tx)
-		if err != nil {
-			return fmt.Errorf("seq: %w", err)
-		}
-		r.Stop = &cut
-		r.Seq = seqKeep
-		r.Modified = now
-		if err := tx.Save(r).Error; err != nil {
-			return fmt.Errorf("split keep: %w", err)
-		}
-
-		seqMove, err := database.NextReportSeq(tx)
-		if err != nil {
-			return fmt.Errorf("seq: %w", err)
-		}
-		moved := models.Report{
-			UserID:     r.UserID,
-			CustomerID: r.CustomerID,
-			ProjectID:  toID,
-			Start:      cut,
-			Stop:       &origStop,
-			Comment:    r.Comment,
-			Modified:   now,
-			Seq:        seqMove,
-			Deleted:    false,
-			Invoiced:   false,
-		}
-		if moved.CustomerID == 0 {
-			moved.CustomerID = customerID
-		}
-		_ = moveDur // duration of moved piece; kept for clarity
-		if err := tx.Create(&moved).Error; err != nil {
-			return fmt.Errorf("split create: %w", err)
-		}
-		if err := retargetReportLine(tx, moved.ID, toID, r.Comment); err != nil {
-			return fmt.Errorf("split line: %w", err)
-		}
-		if err := retargetReportLine(tx, r.ID, fromID, r.Comment); err != nil {
-			return fmt.Errorf("keep line: %w", err)
-		}
-		remaining = 0
-	}
-
-	if remaining > 0 {
-		return &badRequestError{msg: "failed to move full amount (internal)"}
-	}
-	return nil
-}
 
 // PDF generates a timesheet PDF for one customer and month.
 // GET /api/timesheets/pdf?month=YYYY-MM&customer_id=N
@@ -646,23 +505,20 @@ func (h *TimesheetsHandler) PDF(c echo.Context) error {
 		names[id] = p.Name
 	}
 
-	projectLabel := ""
-	if len(projIDs) == 1 {
-		for id := range projIDs {
-			if p, ok := projectsByID[id]; ok {
-				projectLabel = p.Name
-			}
-		}
-	}
-
 	days, grandTotal := groupReportsByDay(reports, names, loc)
-	projectSummaries := projectSummariesForCustomer(reports, projectsByID, catalog)
+	userIDs := distinctIDs(reports, func(r models.Report) int64 { return r.UserID })
+	shares, err := loadDayShares(h.DB, userIDs, []int64{customerID})
+	if err != nil {
+		return internal(c, "failed to load billing splits")
+	}
+	days = daysWithSharedProjects(days, reports, projectsByID, customerID, loc, shares)
+	projectSummaries := projectSummariesForCustomer(reports, projectsByID, catalog, loc, shares)
 	periodLabel := start.Format("January 2006")
 	customerLabel := strings.TrimSpace(cust.Description)
 	if customerLabel == "" {
 		customerLabel = cust.Name
 	}
-	pdfBytes, err := generateTimesheetPDF(customerLabel, projectLabel, periodLabel, days, grandTotal, projectSummaries)
+	pdfBytes, err := generateTimesheetPDF(customerLabel, periodLabel, days, grandTotal, projectSummaries)
 	if err != nil {
 		return internal(c, "failed to generate PDF")
 	}
@@ -690,15 +546,17 @@ func projectDisplayName(id int64, names map[int64]string) string {
 func notesForReport(r models.Report, names map[int64]string) []timesheetNote {
 	if len(r.Lines) == 0 {
 		return []timesheetNote{{
-			Project: projectDisplayName(r.ProjectID, names),
-			Comment: r.Comment,
+			ProjectID: r.ProjectID,
+			Project:   projectDisplayName(r.ProjectID, names),
+			Comment:   r.Comment,
 		}}
 	}
 	notes := make([]timesheetNote, 0, len(r.Lines))
 	for _, ln := range r.Lines {
 		notes = append(notes, timesheetNote{
-			Project: projectDisplayName(ln.ProjectID, names),
-			Comment: ln.Comment,
+			ProjectID: ln.ProjectID,
+			Project:   projectDisplayName(ln.ProjectID, names),
+			Comment:   ln.Comment,
 		})
 	}
 	return notes
@@ -744,39 +602,80 @@ func groupReportsByDay(reports []models.Report, names map[int64]string, loc *tim
 	return days, grandTotal
 }
 
+// daysWithSharedProjects lists every project named on a day on each report,
+// and puts that project's day length on the first report that names it.
+// The same notes are what the monthly report shows.
+func daysWithSharedProjects(
+	days []timesheetDay,
+	reports []models.Report,
+	projectsByID map[int64]models.Project,
+	customerID int64,
+	loc *time.Location,
+	shares dayShares,
+) []timesheetDay {
+	built := monthlyDays(days, reportsByLocalDate(reports, loc), projectsByID, customerID, shares)
+	if len(built) != len(days) {
+		return days
+	}
+	out := make([]timesheetDay, len(days))
+	for i, day := range days {
+		out[i] = day
+		out[i].Entries = make([]timesheetDayEntry, len(day.Entries))
+		for j, e := range day.Entries {
+			out[i].Entries[j] = e
+			if j >= len(built[i].Entries) {
+				continue
+			}
+			notes := built[i].Entries[j].Notes
+			stamped := make([]timesheetNote, len(notes))
+			for k, n := range notes {
+				stamped[k] = timesheetNote{
+					ProjectID: n.ProjectID,
+					Project:   n.Project,
+					Comment:   n.Comment,
+					Length:    n.LengthHM,
+				}
+			}
+			out[i].Entries[j].Notes = stamped
+		}
+	}
+	return out
+}
+
 // summarizeReportsByProject splits reported time for a timesheet into per-project
 // totals. Unit is taken from the project (label only). Sorted by project name.
 func summarizeReportsByProject(
 	reports []models.Report,
 	projectsByID map[int64]models.Project,
+	loc *time.Location,
+	shares dayShares,
 ) []timesheetProjectSummary {
+	if loc == nil {
+		loc = time.UTC
+	}
 	type acc struct {
 		duration time.Duration
 		entries  int
 	}
-	byID := map[int64]*acc{}
-	var shared acc
+	grouped := map[string][]models.Report{}
 	for _, r := range reports {
-		if r.Stop == nil {
+		if durationSeconds(r) <= 0 {
 			continue
 		}
-		dur := r.Stop.Sub(r.Start)
-		if dur < 0 {
-			continue
+		key := reportDayKey(r, loc)
+		grouped[key] = append(grouped[key], r)
+	}
+	byID := map[int64]*acc{}
+	for key, dayReports := range grouped {
+		for projectID, sec := range dayBilling(dayReports, shares[key]) {
+			a := byID[projectID]
+			if a == nil {
+				a = &acc{}
+				byID[projectID] = a
+			}
+			a.duration += time.Duration(sec) * time.Second
+			a.entries++
 		}
-		projectID, isShared := models.AttributedProject(r)
-		if isShared {
-			shared.duration += dur
-			shared.entries++
-			continue
-		}
-		a := byID[projectID]
-		if a == nil {
-			a = &acc{}
-			byID[projectID] = a
-		}
-		a.duration += dur
-		a.entries++
 	}
 
 	out := make([]timesheetProjectSummary, 0, len(byID)+1)
@@ -805,20 +704,11 @@ func summarizeReportsByProject(
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	if shared.entries > 0 {
-		out = append(out, timesheetProjectSummary{
-			ProjectID: 0,
-			Name:      "Several projects",
-			Unit:      "hours",
-			Duration:  shared.duration,
-			Entries:   shared.entries,
-		})
-	}
 	return out
 }
 
 func generateTimesheetPDF(
-	customerName, projectName, periodLabel string,
+	customerName, periodLabel string,
 	days []timesheetDay,
 	grandTotal time.Duration,
 	projectSummaries []timesheetProjectSummary,
@@ -838,13 +728,6 @@ func generateTimesheetPDF(
 	pdf.SetFont("Arial", "", 12)
 	pdf.MultiCell(0, 7, tr(customerName), "", "L", false)
 
-	if projectName != "" {
-		pdf.SetFont("Arial", "B", 12)
-		pdf.CellFormat(35, 7, "Project:", "", 0, "L", false, 0, "")
-		pdf.SetFont("Arial", "", 12)
-		pdf.MultiCell(0, 7, tr(projectName), "", "L", false)
-	}
-
 	pdf.SetFont("Arial", "B", 12)
 	pdf.CellFormat(35, 7, "Period:", "", 0, "L", false, 0, "")
 	pdf.SetFont("Arial", "", 12)
@@ -852,23 +735,23 @@ func generateTimesheetPDF(
 	pdf.Ln(6)
 
 	const (
-		colProject   = 48.0
-		colComment   = 87.0
-		colStart     = 15.0
-		colStop      = 15.0
-		colLength    = 15.0
+		colStart     = 16.0
+		colStop      = 16.0
+		colProject   = 40.0
+		colComment   = 92.0
+		colLength    = 16.0
 		wrapLineHt   = 3.3
 		paraGap      = 2.4
 		noteSep      = 2.2
 		cellPadY     = 1.5
-		tableWidth   = colProject + colComment + colStart + colStop + colLength
+		tableWidth   = colStart + colStop + colProject + colComment + colLength
 		projectWidth = colProject - 2
 		commentWidth = colComment - 2
 		dayHeadingH  = 9.0
 		tableHeaderH = 7.0
 		dayTotalH    = 6.0
 		dayGapH      = 4.0
-		labelSpan    = colProject + colComment + colStart + colStop
+		labelSpan    = colStart + colStop + colProject + colComment
 	)
 
 	// wrapPlain splits text already passed through the PDF encoding translator.
@@ -916,6 +799,7 @@ func generateTimesheetPDF(
 	type laidNote struct {
 		projectLines []string
 		commentParas [][]string
+		length       string
 		h            float64
 	}
 
@@ -934,7 +818,15 @@ func generateTimesheetPDF(
 			if cH > h {
 				h = cH
 			}
-			notes[i] = laidNote{projectLines: pLines, commentParas: paras, h: h}
+			if wrapLineHt > h {
+				h = wrapLineHt
+			}
+			notes[i] = laidNote{
+				projectLines: pLines,
+				commentParas: paras,
+				length:       strings.TrimSpace(n.Length),
+				h:            h,
+			}
 			rowH += h
 		}
 		if len(notes) > 1 {
@@ -972,10 +864,10 @@ func generateTimesheetPDF(
 	writeTableHeader := func() {
 		pdf.SetFont("Arial", "B", 9)
 		pdf.SetFillColor(230, 230, 230)
-		pdf.CellFormat(colProject, tableHeaderH, "Project", "1", 0, "L", true, 0, "")
-		pdf.CellFormat(colComment, tableHeaderH, "Comment", "1", 0, "L", true, 0, "")
 		pdf.CellFormat(colStart, tableHeaderH, "Start", "1", 0, "C", true, 0, "")
 		pdf.CellFormat(colStop, tableHeaderH, "Stop", "1", 0, "C", true, 0, "")
+		pdf.CellFormat(colProject, tableHeaderH, "Project", "1", 0, "L", true, 0, "")
+		pdf.CellFormat(colComment, tableHeaderH, "Comment", "1", 0, "L", true, 0, "")
 		pdf.CellFormat(colLength, tableHeaderH, "Length", "1", 1, "C", true, 0, "")
 	}
 
@@ -995,26 +887,36 @@ func generateTimesheetPDF(
 		}
 
 		pdf.SetDrawColor(0, 0, 0)
-		pdf.Rect(x0, y0, colProject, rowH, "D")
-		pdf.Rect(x0+colProject, y0, colComment, rowH, "D")
-		xTime := x0 + colProject + colComment
-		pdf.Rect(xTime, y0, colStart, rowH, "D")
-		pdf.Rect(xTime+colStart, y0, colStop, rowH, "D")
-		pdf.Rect(xTime+colStart+colStop, y0, colLength, rowH, "D")
+		pdf.Rect(x0, y0, tableWidth, rowH, "D")
+		xStop := x0 + colStart
+		xProject := xStop + colStop
+		xComment := xProject + colProject
+		xLength := xComment + colComment
+		pdf.Line(xStop, y0, xStop, y0+rowH)
+		pdf.Line(xProject, y0, xProject, y0+rowH)
+		pdf.Line(xComment, y0, xComment, y0+rowH)
+		pdf.Line(xLength, y0, xLength, y0+rowH)
+
+		pdf.SetFont("Arial", "", 9)
+		topY := y0 + cellPadY
+		pdf.SetXY(x0, topY)
+		pdf.CellFormat(colStart, wrapLineHt, e.Start, "", 0, "C", false, 0, "")
+		pdf.SetXY(xStop, topY)
+		pdf.CellFormat(colStop, wrapLineHt, e.Stop, "", 0, "C", false, 0, "")
 
 		y := y0 + cellPadY
 		for i, n := range laid {
 			if i > 0 {
 				sepY := y + noteSep/2
 				pdf.SetDrawColor(210, 210, 210)
-				pdf.Line(x0, sepY, x0+colProject+colComment, sepY)
+				pdf.Line(xProject, sepY, x0+tableWidth, sepY)
 				pdf.SetDrawColor(0, 0, 0)
 				y += noteSep
 			}
 			pdf.SetFont("Arial", "B", 9)
 			py := y
 			for _, line := range n.projectLines {
-				pdf.SetXY(x0+1, py)
+				pdf.SetXY(xProject+1, py)
 				pdf.CellFormat(projectWidth, wrapLineHt, line, "", 0, "L", false, 0, "")
 				py += wrapLineHt
 			}
@@ -1025,22 +927,17 @@ func generateTimesheetPDF(
 					cy += paraGap
 				}
 				for _, line := range lines {
-					pdf.SetXY(x0+colProject+1, cy)
+					pdf.SetXY(xComment+1, cy)
 					pdf.CellFormat(commentWidth, wrapLineHt, line, "", 0, "L", false, 0, "")
 					cy += wrapLineHt
 				}
 			}
+			if n.length != "" {
+				pdf.SetXY(xLength, y)
+				pdf.CellFormat(colLength, wrapLineHt, n.length, "", 0, "C", false, 0, "")
+			}
 			y += n.h
 		}
-
-		pdf.SetFont("Arial", "", 9)
-		textY := y0 + (rowH-wrapLineHt)/2
-		pdf.SetXY(xTime, textY)
-		pdf.CellFormat(colStart, wrapLineHt, e.Start, "", 0, "C", false, 0, "")
-		pdf.SetXY(xTime+colStart, textY)
-		pdf.CellFormat(colStop, wrapLineHt, e.Stop, "", 0, "C", false, 0, "")
-		pdf.SetXY(xTime+colStart+colStop, textY)
-		pdf.CellFormat(colLength, wrapLineHt, e.Length, "", 0, "C", false, 0, "")
 		pdf.SetXY(x0, y0+rowH)
 	}
 
@@ -1217,6 +1114,26 @@ func (h *TimesheetsHandler) monthRange(c echo.Context, monthStr string) (string,
 	}
 	label, start, end, err := parseMonthParam(monthStr, loc)
 	return label, start, end, loc, err
+}
+
+// dayWindowInMonth is one calendar day inside monthStr, both in loc.
+// dateStr is YYYY-MM-DD. The window is [midnight, next midnight) in that zone.
+func dayWindowInMonth(dateStr, monthStr string, loc *time.Location) (time.Time, time.Time, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	dateStr = strings.TrimSpace(dateStr)
+	if dateStr == "" {
+		return time.Time{}, time.Time{}, fmt.Errorf("date is required")
+	}
+	dayStart, err := time.ParseInLocation("2006-01-02", dateStr, loc)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("date must be YYYY-MM-DD")
+	}
+	if dayStart.Format("2006-01") != monthStr {
+		return time.Time{}, time.Time{}, fmt.Errorf("date must fall in the given month")
+	}
+	return dayStart, dayStart.AddDate(0, 0, 1), nil
 }
 
 func parseMonthParam(monthStr string, loc *time.Location) (string, time.Time, time.Time, error) {

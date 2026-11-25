@@ -10,10 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 - The Customers page opens sorted by name. A customer's projects open with active projects first, then inactive projects, each group sorted by name.
 - Report instants are stored and compared in UTC. A time with no zone is read as UTC. A month in the monthly report and the timesheet is the calendar month in the viewer's timezone: the browser sends that zone, or the server uses the timezone saved on the user. An empty profile timezone follows the browser. Clocks on screen are converted only for display.
-- A time report belongs to a customer. It can carry several project comments on the same start and stop. The timesheet counts that interval once. Hours are added to a project only when the report names that project alone. Shared intervals are listed as "Several projects" and are not split by moving time between projects.
-- The timesheet PDF lists the project first, then that project's comment. Several projects on one interval stay on one row.
+- A time report belongs to a customer. It can carry several project comments on the same start and stop. The timesheet counts that interval once. Until time is moved, the whole interval is billed on the report's project.
+- The timesheet PDF uses the same day table as the monthly report: Start, Stop, Project, Comment, Length. Every report on a day lists every project named that day. The length is that project's share of the day, shown once, on the report that names it. The PDF no longer repeats a project name in the header. Start, stop, and length sit at the top of the row.
 - The monthly report lists each day the same way: project, then that project's comment, with several projects kept on one interval. Its summary by project, and the PDF summary, list every active project for that customer, including projects with no time in the month (shown as 00:00). Shared intervals stay on the day list and are not a "Several projects" row in that summary. An inactive project appears there only when it has time of its own.
 - PDF export, moving time between projects, and invoice marking live on the monthly report. The Timesheets page redirects there.
+- Moving time between projects changes only the length billed to each project for that day. Start, stop, and comment stay on the report. The lengths add up to the day's worked time. A day with one project has nothing to move. A move onto the same project is refused.
+- Each report on a day lists every project named on that day. A project with no comment on that report has an empty comment and no length. The length is shown once, on the first report that names that project.
 - Sync protocol is 2. `/healthz` advertises `2`.
 
 ### Added
