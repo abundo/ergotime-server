@@ -1,6 +1,6 @@
 # ergotime-server
 
-Modern reimplementation of the Ergotime web API and GUI server. Release notes are in [CHANGELOG.md](CHANGELOG.md). License: [GPLv3](LICENSE).
+Implementation of the Ergotime web API and GUI server. Release notes are in [CHANGELOG.md](CHANGELOG.md). License: [GPLv3](LICENSE).
 
 Tracks work time (**customers → projects → reports**), serves a Vue SPA admin UI,
 and syncs with the desktop client.
@@ -69,7 +69,7 @@ cp config/config.debug.yaml config/config.yaml
 
 ```bash
 go build -o bin/ergotime-server ./cmd/server
-./bin/ergotime-server -config config/config.debug.yaml
+./bin/ergotime-server --config config/config.debug.yaml start
 ```
 
 Default bootstrap user (only if the `users` table is empty):
@@ -98,7 +98,7 @@ on disk is required at runtime.
 ```bash
 make release
 # equivalent: make frontend && go build -ldflags="-s -w" -o bin/ergotime-server ./cmd/server
-./bin/ergotime-server -config config/config.yaml
+./bin/ergotime-server --config config/config.yaml start
 ```
 
 Or: `make all` then `make run`.
@@ -110,7 +110,7 @@ For local frontend iteration without recompiling Go, set `static.dir: web/dist`
 
 Config file search order:
 
-1. `-config` flag
+1. `--config` flag (`-c`, or `-config` from older units)
 2. `ERGOTIME_CONFIG` env
 3. `./config.yaml`, `./config/config.yaml`, `/etc/ergotime/config.yaml`
 

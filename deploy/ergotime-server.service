@@ -8,7 +8,7 @@ Type=simple
 User=ergotime
 Group=ergotime
 WorkingDirectory=/opt/ergotime2
-ExecStart=/opt/ergotime2/bin/ergotime-server -config /etc/ergotime/config.yaml
+ExecStart=/opt/ergotime2/bin/ergotime-server --config /etc/ergotime/config.yaml start
 Restart=on-failure
 RestartSec=3
 # Hardening

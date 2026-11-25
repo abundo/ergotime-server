@@ -26,7 +26,7 @@ frontend-dev:
 	cd web && npm run dev
 
 run: server
-	./$(BINARY) -config $(CONFIG)
+	./$(BINARY) --config $(CONFIG) start
 
 tidy:
 	go mod tidy

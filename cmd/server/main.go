@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io/fs"
 	"log"
@@ -18,22 +17,45 @@ import (
 	"github.com/abundo/ergotime-server/internal/handlers"
 	appmw "github.com/abundo/ergotime-server/internal/middleware"
 	"github.com/abundo/ergotime-server/web"
+	"github.com/alecthomas/kong"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
 
-func main() {
-	configPath := flag.String("config", "", "path to config.yaml (or set ERGOTIME_CONFIG)")
-	flag.Parse()
+// CLI is the ergotime-server command line.
+// Config search order matches internal/config.Load: this flag, then
+// ERGOTIME_CONFIG, then the default paths.
+type CLI struct {
+	Config string   `short:"c" type:"path" placeholder:"FILE" env:"ERGOTIME_CONFIG" help:"Path to config.yaml. Overrides ERGOTIME_CONFIG."`
+	Start  StartCmd `cmd:"" help:"Start the API and web GUI."`
+}
 
-	cfg, err := config.Load(*configPath)
+// StartCmd runs the HTTP server.
+type StartCmd struct{}
+
+func main() {
+	// Kong's long flags are --config. Installed units and scripts may still
+	// pass the old flag-package form -config, so accept that too.
+	os.Args = acceptSingleDashConfig(os.Args)
+
+	var cli CLI
+	ctx := kong.Parse(&cli,
+		kong.Name("ergotime-server"),
+		kong.Description("Ergotime API and web GUI."),
+		kong.UsageOnError(),
+	)
+	ctx.FatalIfErrorf(ctx.Run())
+}
+
+func (c *StartCmd) Run(cli *CLI) error {
+	cfg, err := config.Load(cli.Config)
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		return fmt.Errorf("config: %w", err)
 	}
 
 	db, err := database.Connect(cfg)
 	if err != nil {
-		log.Fatalf("database: %v", err)
+		return fmt.Errorf("database: %w", err)
 	}
 
 	tokens := auth.NewTokenService(cfg)
@@ -151,8 +173,26 @@ func main() {
 	addr := cfg.Addr()
 	log.Printf("ergotime-server listening on %s (mode=%s)", addr, cfg.Server.Mode)
 	if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server: %v", err)
+		return fmt.Errorf("server: %w", err)
 	}
+	return nil
+}
+
+// acceptSingleDashConfig rewrites -config and -config=FILE to the --config form.
+func acceptSingleDashConfig(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	out := append([]string(nil), args...)
+	for i := 1; i < len(out); i++ {
+		switch {
+		case out[i] == "-config":
+			out[i] = "--config"
+		case strings.HasPrefix(out[i], "-config="):
+			out[i] = "--config=" + out[i][len("-config="):]
+		}
+	}
+	return out
 }
 
 // resolveStaticFS picks the SPA filesystem: on-disk static.dir if present, else embed.
