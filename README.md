@@ -140,7 +140,7 @@ All JSON endpoints under `/api` require authentication except:
 | ------ | ------------------ | --------------------------------------------------------------- |
 | POST   | `/api/auth/login`  | JSON `{username,password}` → sets session cookie                |
 | POST   | `/api/auth/logout` | Clears session cookie                                           |
-| GET    | `/healthz`         | Liveness. `protocol` is the desktop sync contract (currently 2) |
+| GET    | `/healthz`         | Liveness. `protocol` is the desktop sync contract (currently 3) |
 | GET    | `/readyz`          | DB readiness                                                    |
 
 Authenticated (cookie JWT, `Authorization: Bearer <jwt>`, or HTTP Basic):

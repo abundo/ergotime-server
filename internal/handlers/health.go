@@ -15,7 +15,10 @@ import (
 // Protocol 2 adds report lines (several project comments on one customer
 // interval). An older client would store only project_id and comment, then
 // push that back and drop the other lines.
-const SyncProtocol = 2
+// Protocol 3 rejects a report whose start or stop is not a whole minute, or
+// whose closed length is under one minute. The previous client sent seconds
+// from the tracker, so this server would reject that client's pushes.
+const SyncProtocol = 3
 
 // HealthHandler provides liveness/readiness probes.
 type HealthHandler struct {

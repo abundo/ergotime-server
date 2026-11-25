@@ -183,7 +183,14 @@ import InputText from "primevue/inputtext";
 import Select from "primevue/select";
 import Textarea from "primevue/textarea";
 import api, { errorMessage } from "@/api/client";
-import { formatDateTime, toLocalInput, fromLocalInput } from "@/utils/datetime";
+import {
+    formatDateTime,
+    toLocalInput,
+    fromLocalInput,
+    floorUtcMinute,
+    addMinutesUtc,
+    reportIntervalError,
+} from "@/utils/datetime";
 
 const toast = useToast();
 const confirm = useConfirm();
@@ -336,6 +343,14 @@ function openEdit(row) {
     form.customer_id = row.customer_id || p?.customer_id || null;
     form.start = toLocalInput(row.start);
     form.stop = toLocalInput(row.stop);
+    // Seconds are not shown. A remainder under one minute ends on the next minute.
+    if (form.start && form.stop) {
+        const start = floorUtcMinute(fromLocalInput(form.start));
+        const stop = floorUtcMinute(fromLocalInput(form.stop));
+        if (start && stop && Date.parse(stop) - Date.parse(start) < 60000) {
+            form.stop = toLocalInput(addMinutesUtc(start, 1));
+        }
+    }
     const comments = {};
     for (const ln of lines) {
         if (ln.comment) comments[ln.project_id] = ln.comment;
@@ -355,14 +370,24 @@ async function save() {
         });
         return;
     }
-    const start = fromLocalInput(form.start);
-    const stop = form.stop ? fromLocalInput(form.stop) : null;
+    const start = floorUtcMinute(fromLocalInput(form.start));
+    const stop = form.stop ? floorUtcMinute(fromLocalInput(form.stop)) : null;
     if (!start || (form.stop && !stop)) {
         toast.add({
             severity: "warn",
             summary: "Validation",
             detail: "Use date/time as YYYY-MM-DD HH:MM (24-hour)",
             life: 3500,
+        });
+        return;
+    }
+    const intervalError = reportIntervalError(start, stop);
+    if (intervalError) {
+        toast.add({
+            severity: "warn",
+            summary: "Validation",
+            detail: "Report must be at least 1 minute. Stop is the next minute, so 12:20 ends at 12:21.",
+            life: 4000,
         });
         return;
     }

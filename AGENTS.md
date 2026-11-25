@@ -25,9 +25,13 @@ that fits cleanly now. Go on only once they've chosen.
 
 - `SyncProtocol` in `internal/handlers/health.go` is the desktop contract.
   `GET /healthz` advertises it. Bump it only when a client that speaks the old
-  number must be refused. It is 2: a report carries several project lines.
+  number must be refused. It is 3: start and stop are whole minutes, and a
+  closed report lasts at least one minute. Protocol 2 added report lines.
 - A report is one user, one customer, and one time interval. Lines attribute
   that whole interval to projects. Do not split `start`/`stop` across projects.
+  Start and stop have seconds 0. Stop is the next whole minute when the
+  report is one minute long: 12:20:00–12:21:00, not 12:20:59. An open report
+  may omit stop. Rows already stored stay as they are until the next edit.
   `project_id` on the report is the anchor line so older filters still match.
 - `seq` is the monotonic sync cursor. Deletes are soft (`deleted`) so clients
   can pull them. `client_uuid` is the idempotency key for creates.

@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
+- Sync protocol is 3. `/healthz` advertises `3`. Creating or updating a report requires a start and stop on a minute boundary (seconds 0) and a length of at least one minute. A report that starts at 12:20 ends at 12:21:00. An open report may omit stop. Reports already stored are left as they are until the next edit. The report form drops seconds and refuses a length under one minute.
 - The Customers page opens sorted by name. A customer's projects open with active projects first, then inactive projects, each group sorted by name.
 - Report instants are stored and compared in UTC. A time with no zone is read as UTC. A month in the monthly report and the timesheet is the calendar month in the viewer's timezone: the browser sends that zone, or the server uses the timezone saved on the user. An empty profile timezone follows the browser. Clocks on screen are converted only for display.
 - A time report belongs to a customer. It can carry several project comments on the same start and stop. The timesheet counts that interval once. Until time is moved, the whole interval is billed on the report's project.
@@ -16,11 +17,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - PDF export, moving time between projects, and invoice marking live on the monthly report. The Timesheets page redirects there.
 - Moving time between projects changes only the length billed to each project for that day. Start, stop, and comment stay on the report. The lengths add up to the day's worked time. A day with one project has nothing to move. A move onto the same project is refused.
 - Each report on a day lists every project named on that day. A project with no comment on that report has an empty comment and no length. The length is shown once, on the first report that names that project.
-- Sync protocol is 2. `/healthz` advertises `2`.
 
 ### Added
 
-- `/healthz` advertises `protocol`, the desktop sync contract. It stays at 2 until a change would make an older client misread this server or this server reject that client.
+- `/healthz` advertises `protocol`, the desktop sync contract. It is 3. Bump it when an older client would misread this server or this server would reject that client.
 - Example Caddyfile for the reverse HTTPS proxy (`deploy/caddy-ergotime.Caddyfile`).
 - One project per customer can be marked as the default. Setting a new default clears the previous one. New time reports preselect that project when the customer is chosen.
 

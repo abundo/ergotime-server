@@ -148,6 +148,37 @@ export function toLocalInput(v) {
   return `${p.y}-${pad(p.m)}-${pad(p.d)} ${pad(p.h)}:${pad(p.min)}`;
 }
 
+/** Zero the seconds of a UTC RFC3339 instant. The minute is unchanged. */
+export function floorUtcMinute(iso) {
+  if (!iso) return iso;
+  return String(iso).replace(/:\d{2}Z$/, ":00Z");
+}
+
+/** Add whole minutes to a UTC RFC3339 instant and return the same shape. */
+export function addMinutesUtc(iso, minutes) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  return new Date(t + minutes * 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+/**
+ * Closed reports are whole minutes and at least one minute long.
+ * Empty stop is an open report. Returns "" when the interval is allowed.
+ */
+export function reportIntervalError(startIso, stopIso) {
+  if (!startIso || !/T\d{2}:\d{2}:00Z$/.test(startIso)) {
+    return "start must be on a minute boundary";
+  }
+  if (!stopIso) return "";
+  if (!/T\d{2}:\d{2}:00Z$/.test(stopIso)) {
+    return "stop must be on a minute boundary";
+  }
+  if (Date.parse(stopIso) - Date.parse(startIso) < 60000) {
+    return "report must be at least 1 minute";
+  }
+  return "";
+}
+
 /**
  * Convert a display-timezone wall time to a UTC instant for the API.
  * Returns RFC3339 with a Z suffix.

@@ -8,6 +8,36 @@ import (
 	"gorm.io/gorm"
 )
 
+// Closed reports start and stop on a minute boundary (second and fraction 0)
+// and last at least one minute. Stop is the next whole minute, so 12:20 for
+// one minute is 12:20:00–12:21:00. An open report may omit stop; its start
+// still has to be a whole minute. :59 is not a boundary.
+var (
+	errStartNotMinute = errors.New("start must be on a minute boundary")
+	errStopNotMinute  = errors.New("stop must be on a minute boundary")
+	errReportTooShort = errors.New("report must be at least 1 minute")
+)
+
+func onMinute(t time.Time) bool {
+	return t.Second() == 0 && t.Nanosecond() == 0
+}
+
+func validateReportTimes(start time.Time, stop *time.Time) error {
+	if !onMinute(start) {
+		return errStartNotMinute
+	}
+	if stop == nil {
+		return nil
+	}
+	if !onMinute(*stop) {
+		return errStopNotMinute
+	}
+	if stop.Sub(start) < time.Minute {
+		return errReportTooShort
+	}
+	return nil
+}
+
 func attachLines(db *gorm.DB, items []models.Report) error {
 	if len(items) == 0 {
 		return nil
@@ -100,6 +130,9 @@ func writeReport(tx *gorm.DB, item *models.Report, isNew bool) error {
 		stop := item.Stop.UTC()
 		item.Stop = &stop
 	}
+	if err := validateReportTimes(item.Start, item.Stop); err != nil {
+		return err
+	}
 	if !item.Modified.IsZero() {
 		item.Modified = item.Modified.UTC()
 	}
@@ -144,6 +177,8 @@ func lineError(err error) (string, bool) {
 	case errors.Is(err, models.ErrUnknownProject):
 		return "project not found", true
 	case errors.Is(err, models.ErrMixedCustomer):
+		return err.Error(), true
+	case errors.Is(err, errStartNotMinute), errors.Is(err, errStopNotMinute), errors.Is(err, errReportTooShort):
 		return err.Error(), true
 	default:
 		return "", false
